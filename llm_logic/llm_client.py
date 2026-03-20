@@ -1,0 +1,222 @@
+"""
+Cliente LLM abstrato que suporta OpenAI e Ollama
+"""
+from typing import List, Dict, Optional
+from openai import OpenAI
+from config.config import settings
+import os
+import logging
+import requests
+import logging
+
+class LLMClient:
+    """Cliente LLM que suporta OpenAI e Ollama"""
+
+    def __init__(self):
+        # Lê do settings (Pydantic carrega do .env) com fallback para os.getenv
+        self.provider = (settings.llm_provider or os.getenv("LLM_PROVIDER", "openai")).lower()
+
+        # Define modelo padrão baseado no provider
+        default_model = "gpt-4" if self.provider == "openai" else "llama2"
+        self.model = settings.llm_model or os.getenv("LLM_MODEL", default_model)
+
+        if self.provider == "ollama":
+            # Ollama usa API compatível com OpenAI
+            ollama_base_url = settings.ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            
+            # Se não tem http/https, adiciona
+            if not ollama_base_url.startswith("http"):
+                ollama_base_url = "http://" + ollama_base_url
+            
+            # Remove trailing slash
+            ollama_base_url = ollama_base_url.rstrip('/')
+            
+            # Guarda ambas as versões (com e sem /v1)
+            self.ollama_base_url = ollama_base_url  # http://localhost:11434
+            self.ollama_base_url_v1 = ollama_base_url + '/v1'  # http://localhost:11434/v1
+            
+            ollama_api_key = settings.ollama_api_key or os.getenv("OLLAMA_API_KEY", "ollama")
+            
+            # Tenta OpenAI-compatible endpoint primeiro
+            try:
+                self.client = OpenAI(
+                    base_url=self.ollama_base_url_v1,
+                    api_key=ollama_api_key
+                )
+            except Exception as e:
+                # Fallback para endpoint nativo do Ollama
+                self.client = OpenAI(
+                    base_url=self.ollama_base_url,
+                    api_key=ollama_api_key
+                )
+            # Logger
+            self.logger = logging.getLogger("agent_system")
+
+            # Query Ollama for available models and pick a compatible one if needed
+            try:
+                # Tenta endpoint compatível com OpenAI primeiro
+                models_endpoint = self.ollama_base_url_v1 + '/models'
+                resp = requests.get(models_endpoint, timeout=3)
+                
+                # Se falhar, tenta endpoint nativo do Ollama
+                if not resp.ok or resp.status_code == 404:
+                    models_endpoint = self.ollama_base_url + '/api/tags'
+                    resp = requests.get(models_endpoint, timeout=3)
+                
+                if resp.ok:
+                    data = resp.json()
+                    models_list = []
+                    
+                    # Parse de endpoint /v1/models
+                    if isinstance(data, dict) and 'data' in data:
+                        for m in data['data']:
+                            if isinstance(m, dict) and 'id' in m:
+                                models_list.append(m['id'])
+                    
+                    # Parse de endpoint /api/tags (Ollama nativo)
+                    elif isinstance(data, dict) and 'models' in data:
+                        for m in data['models']:
+                            if isinstance(m, dict) and 'name' in m:
+                                models_list.append(m['name'])
+                    elif isinstance(data, list):
+                        for m in data:
+                            if isinstance(m, str):
+                                models_list.append(m)
+                            elif isinstance(m, dict) and 'name' in m:
+                                models_list.append(m['name'])
+
+                    if models_list:
+                        self.logger.info(f"Modelos Ollama disponíveis: {models_list}")
+                        # If configured model not available, pick the first available
+                        if self.model not in models_list:
+                            chosen = models_list[0]
+                            self.logger.info(f"Modelo configurado '{self.model}' não encontrado em Ollama. Usando '{chosen}'")
+                            self.model = chosen
+                else:
+                    self.logger.debug(f"Não foi possível listar modelos Ollama: HTTP {resp.status_code}")
+            except Exception as e:
+                # Não falhar se a lista não puder ser obtida
+                try:
+                    self.logger.debug(f"Erro ao consultar modelos Ollama: {e}")
+                except Exception:
+                    pass
+            
+            # Se modelo configurado parece ser OpenAI, usar Ollama default
+            try:
+                model_lower = (self.model or "").lower()
+                if "gpt" in model_lower or model_lower.startswith("text-"):
+                    ollama_fallback = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
+                    self.logger.warning(
+                        f"Modelo configurado '{self.model}' parece ser OpenAI-only. Trocando para '{ollama_fallback}' para Ollama."
+                    )
+                    self.model = ollama_fallback
+            except Exception:
+                pass
+        else:
+            # OpenAI padrão
+            api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY não configurada. Configure no .env ou use LLM_PROVIDER=ollama")
+            self.client = OpenAI(api_key=api_key)
+
+    def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        model: Optional[str] = None
+    ) -> str:
+        """
+        Cria uma completion de chat
+
+        Args:
+            messages: Lista de mensagens no formato [{"role": "system/user/assistant", "content": "..."}]
+            temperature: Temperatura para sampling
+            max_tokens: Número máximo de tokens
+            model: Nome do modelo (usa self.model se None)
+
+        Returns:
+            Conteúdo da resposta
+        """
+        model_name = model or self.model
+
+        try:
+            # Logging para debug
+            logger = logging.getLogger("agent_system")
+            logger.debug(f"LLMClient.chat_completion: provider={self.provider}, model={model_name}, temp={temperature}")
+            
+            response = self.client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            result = response.choices[0].message.content
+            logger.debug(f"  -> Resposta recebida: {len(result)} chars")
+            return result
+        except Exception as e:
+            # Se estiver a usar Ollama e o erro indicar modelo não encontrado, tenta fallback
+            err_text = str(e).lower()
+            if self.provider == "ollama" and ("not found" in err_text or "404" in err_text) :
+                try:
+                    fallback = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
+                    if fallback and fallback != model_name:
+                        if hasattr(self, "logger"):
+                            self.logger.warning(f"Ollama: modelo '{model_name}' não encontrado, tentando fallback '{fallback}'")
+                        response = self.client.chat.completions.create(
+                            model=fallback,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
+                        # Atualiza modelo atual para evitar repetir erro
+                        self.model = fallback
+                        return response.choices[0].message.content
+                except Exception:
+                    pass
+            raise Exception(f"Erro ao gerar resposta do LLM ({self.provider}): {str(e)}")
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.7,
+        model: Optional[str] = None
+    ) -> str:
+        """
+        Método alternativo para gerar texto a partir de um prompt
+        Wrapper para chat_completion com formato de single message
+        
+        Args:
+            prompt: Texto do prompt
+            max_tokens: Máximo de tokens
+            temperature: Temperatura para sampling
+            model: Modelo a usar (padrão: self.model)
+        
+        Returns:
+            Texto gerado
+        """
+        messages = [
+            {"role": "system", "content": "Você é um assistente inteligente e humanizado."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        return self.chat_completion(messages, temperature=temperature, max_tokens=max_tokens, model=model)
+
+    def get_model_name(self) -> str:
+        """Retorna o nome do modelo atual"""
+        return self.model
+
+    def get_provider(self) -> str:
+        """Retorna o provider atual"""
+        return self.provider
+
+# Instância global do cliente
+_llm_client = None
+
+def get_llm_client() -> LLMClient:
+    """Retorna instância singleton do cliente LLM"""
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = LLMClient()
+    return _llm_client
