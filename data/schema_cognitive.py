@@ -65,6 +65,17 @@ class Agent(Base):
     interactions_received = relationship("AgentInteraction", foreign_keys="AgentInteraction.responder_id", back_populates="responder")
     thought_processes = relationship("ThoughtProcess", back_populates="agent", cascade="all, delete-orphan")
     
+    # Novos relacionamentos
+    emotional_states = relationship("EmotionalState", cascade="all, delete-orphan")
+    personality_profile = relationship("PersonalityProfile", uselist=False, cascade="all, delete-orphan")
+    relationship_bonds = relationship("RelationshipBond", cascade="all, delete-orphan")
+    consciousness_state = relationship("ConsciousnessState", uselist=False, cascade="all, delete-orphan")
+    self_reflections = relationship("SelfReflection", cascade="all, delete-orphan")
+    synaptic_connections = relationship("SynapticConnection", cascade="all, delete-orphan")
+    neural_activations = relationship("NeuralActivation", cascade="all, delete-orphan")
+    learning_events = relationship("LearningEvent", cascade="all, delete-orphan")
+    conversation_sessions = relationship("ConversationSession", cascade="all, delete-orphan")
+    
     __table_args__ = (
         Index('idx_agent_name', 'name'),
         Index('idx_agent_active', 'is_active'),
@@ -488,6 +499,334 @@ class AuditLog(Base):
     __table_args__ = (
         Index('idx_audit_agent', 'agent_id'),
         Index('idx_audit_resource', 'resource_type', 'resource_id'),
+    )
+
+
+# ============================================================================
+# ESTADO EMOCIONAL DINÂMICO
+# ============================================================================
+
+class EmotionalState(Base):
+    """Estado emocional do agente - modelo PAD + emoções básicas"""
+    __tablename__ = "emotional_states"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Modelo PAD (Pleasure-Arousal-Dominance)
+    valence = Column(Float, default=0.0)  # -1 (negativo) a +1 (positivo)
+    arousal = Column(Float, default=0.5)  # 0 (calmo) a 1 (excitado)
+    dominance = Column(Float, default=0.5)  # 0 (submisso) a 1 (dominante)
+    
+    # Emoções básicas (Plutchik)
+    joy = Column(Float, default=0.0)
+    sadness = Column(Float, default=0.0)
+    anger = Column(Float, default=0.0)
+    fear = Column(Float, default=0.0)
+    surprise = Column(Float, default=0.0)
+    disgust = Column(Float, default=0.0)
+    trust = Column(Float, default=0.5)
+    anticipation = Column(Float, default=0.0)
+    
+    # Emoções complexas
+    love = Column(Float, default=0.0)
+    guilt = Column(Float, default=0.0)
+    shame = Column(Float, default=0.0)
+    pride = Column(Float, default=0.0)
+    envy = Column(Float, default=0.0)
+    gratitude = Column(Float, default=0.0)
+    
+    # Contexto
+    trigger = Column(Text)  # O que causou esta emoção
+    is_current = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    duration_seconds = Column(Integer)  # Quanto tempo durou
+    
+    __table_args__ = (
+        Index('idx_emotional_agent', 'agent_id'),
+        Index('idx_emotional_current', 'is_current'),
+    )
+
+
+class PersonalityProfile(Base):
+    """Perfil de personalidade Big Five com facetas"""
+    __tablename__ = "personality_profiles"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    
+    # Big Five (0-1)
+    openness = Column(Float, default=0.5)
+    conscientiousness = Column(Float, default=0.5)
+    extraversion = Column(Float, default=0.5)
+    agreeableness = Column(Float, default=0.5)
+    neuroticism = Column(Float, default=0.5)
+    
+    # Facetas detalhadas (JSON arrays)
+    openness_facets = Column(JSON, default=dict)  # imagination, artistic, emotionality, adventurousness, intellect, liberalism
+    conscientiousness_facets = Column(JSON, default=dict)
+    extraversion_facets = Column(JSON, default=dict)
+    agreeableness_facets = Column(JSON, default=dict)
+    neuroticism_facets = Column(JSON, default=dict)
+    
+    # Valores e crenças
+    values = Column(JSON, default=list)  # Lista de valores fundamentais
+    beliefs = Column(JSON, default=list)  # Crenças sobre o mundo
+    worldview = Column(Text)  # Visão geral do mundo
+    
+    # Motivações e medos
+    core_motivations = Column(JSON, default=list)
+    core_fears = Column(JSON, default=list)
+    
+    # Estilo de comunicação
+    communication_style = Column(JSON, default=dict)  # formal/informal, verbose/concise, etc
+    humor_style = Column(String(50))  # dry, witty, sarcastic, goofy, none
+    speech_patterns = Column(JSON, default=list)  # Expressões típicas, palavras favoritas
+    behavioral_quirks = Column(JSON, default=list)  # Maneirismos únicos
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RelationshipBond(Base):
+    """Vínculo do agente com um utilizador específico"""
+    __tablename__ = "relationship_bonds"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Identificação do utilizador
+    user_id = Column(String(100), nullable=False, index=True)
+    user_name = Column(String(255))
+    user_nickname = Column(String(100))  # Como o agente chama o utilizador
+    
+    # Métricas de relacionamento (0-1)
+    familiarity = Column(Float, default=0.0)  # Quão bem conhece
+    trust_level = Column(Float, default=0.5)  # Confiança
+    affection = Column(Float, default=0.5)  # Carinho
+    respect = Column(Float, default=0.5)  # Respeito
+    
+    # Percepções sobre o utilizador
+    perceived_personality = Column(JSON, default=dict)  # Como vê a personalidade do user
+    shared_interests = Column(JSON, default=list)  # Interesses em comum
+    conversation_topics = Column(JSON, default=list)  # Tópicos que costumam discutir
+    
+    # Histórico
+    first_interaction = Column(DateTime)
+    last_interaction = Column(DateTime)
+    interaction_count = Column(Integer, default=0)
+    
+    # Memórias específicas
+    memorable_moments = Column(JSON, default=list)  # Momentos marcantes
+    emotional_association = Column(JSON, default=dict)  # Emoções associadas a este user
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('agent_id', 'user_id', name='unique_agent_user_bond'),
+        Index('idx_bond_agent', 'agent_id'),
+        Index('idx_bond_user', 'user_id'),
+    )
+
+
+class ConsciousnessState(Base):
+    """Estado de consciência atual do agente"""
+    __tablename__ = "consciousness_states"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    
+    # Foco e atenção
+    current_focus = Column(Text)  # No que está focado agora
+    attention_span = Column(Float, default=0.7)  # Capacidade de foco
+    mental_energy = Column(Float, default=1.0)  # Energia mental disponível
+    cognitive_load = Column(Float, default=0.0)  # Carga cognitiva atual
+    
+    # Estado cognitivo
+    creativity_level = Column(Float, default=0.5)
+    thinking_mode = Column(String(50), default="balanced")  # analytical, creative, emotional, balanced
+    
+    # Curiosidades e questões
+    active_curiosities = Column(JSON, default=list)  # Coisas que quer saber
+    pending_questions = Column(JSON, default=list)  # Perguntas não respondidas
+    acknowledged_uncertainties = Column(JSON, default=list)  # Incertezas reconhecidas
+    
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SelfReflection(Base):
+    """Auto-reflexões do agente"""
+    __tablename__ = "self_reflections"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    reflection_type = Column(String(50))  # identity, behavior, emotion, growth, mistake, success
+    trigger = Column(Text)  # O que provocou a reflexão
+    reflection = Column(Text, nullable=False)  # A reflexão em si
+    insights = Column(JSON, default=list)  # Insights gerados
+    
+    # Impacto
+    led_to_change = Column(Boolean, default=False)
+    change_description = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_reflection_agent', 'agent_id'),
+    )
+
+
+# ============================================================================
+# SIMULAÇÃO NEURAL
+# ============================================================================
+
+class SynapticConnection(Base):
+    """Conexão sináptica entre conceitos (simula rede neural)"""
+    __tablename__ = "synaptic_connections"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    source_concept_id = Column(String(100), nullable=False)
+    target_concept_id = Column(String(100), nullable=False)
+    
+    # Força da conexão
+    weight = Column(Float, default=0.5)  # Peso atual
+    initial_weight = Column(Float, default=0.5)  # Peso inicial
+    connection_type = Column(String(50))  # associative, causal, temporal, semantic
+    
+    # Plasticidade
+    potentiation_count = Column(Integer, default=0)  # Vezes fortalecida (LTP)
+    depression_count = Column(Integer, default=0)  # Vezes enfraquecida (LTD)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('agent_id', 'source_concept_id', 'target_concept_id', name='unique_synapse'),
+        Index('idx_synapse_agent', 'agent_id'),
+        Index('idx_synapse_source', 'source_concept_id'),
+        Index('idx_synapse_target', 'target_concept_id'),
+    )
+
+
+class NeuralActivation(Base):
+    """Ativação de conceitos na rede neural"""
+    __tablename__ = "neural_activations"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    concept_id = Column(String(100), nullable=False)
+    concept_type = Column(String(50))  # memory, emotion, topic, person, skill
+    
+    # Níveis de ativação
+    activation_level = Column(Float, default=0.0)  # Nível atual
+    resting_level = Column(Float, default=0.0)  # Nível de repouso
+    activation_threshold = Column(Float, default=0.5)  # Limite para ativar
+    decay_rate = Column(Float, default=0.1)  # Taxa de decaimento
+    
+    # Histórico
+    last_activation = Column(DateTime)
+    activation_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('agent_id', 'concept_id', name='unique_activation'),
+        Index('idx_activation_agent', 'agent_id'),
+        Index('idx_activation_concept', 'concept_id'),
+    )
+
+
+# ============================================================================
+# APRENDIZAGEM E FEEDBACK
+# ============================================================================
+
+class LearningEvent(Base):
+    """Evento de aprendizagem baseado em feedback"""
+    __tablename__ = "learning_events"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(100), index=True)
+    
+    # Contexto
+    query = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    
+    # Feedback
+    feedback_type = Column(String(50))  # positive, negative, correction, clarification
+    feedback_score = Column(Float)  # -1 a +1
+    feedback_text = Column(Text)  # Feedback textual do utilizador
+    
+    # Aprendizagem
+    lesson_learned = Column(Text)  # O que foi aprendido
+    affected_weights = Column(JSON, default=dict)  # Pesos que foram alterados
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_learning_agent', 'agent_id'),
+        Index('idx_learning_user', 'user_id'),
+    )
+
+
+class ConversationSession(Base):
+    """Sessão de conversa com working memory"""
+    __tablename__ = "conversation_sessions"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(100), index=True)
+    
+    # Estado
+    is_active = Column(Boolean, default=True, index=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime)
+    
+    # Working memory (memória de curto prazo)
+    working_memory = Column(JSON, default=list)  # Últimas mensagens/contexto
+    current_topic = Column(String(255))
+    emotional_tone = Column(String(50))  # tom emocional da conversa
+    
+    # Sumário
+    summary = Column(Text)  # Resumo da conversa
+    key_points = Column(JSON, default=list)  # Pontos importantes
+    unresolved_questions = Column(JSON, default=list)
+    
+    # Metadata
+    message_count = Column(Integer, default=0)
+    
+    __table_args__ = (
+        Index('idx_session_agent', 'agent_id'),
+        Index('idx_session_user', 'user_id'),
+        Index('idx_session_active', 'is_active'),
+    )
+
+
+class ConversationMessage(Base):
+    """Mensagem individual numa sessão"""
+    __tablename__ = "conversation_messages"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id = Column(String(36), ForeignKey("conversation_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    role = Column(String(20), nullable=False)  # user, assistant, system
+    content = Column(Text, nullable=False)
+    
+    # Análise
+    detected_emotion = Column(String(50))  # Emoção detectada na mensagem
+    detected_intent = Column(String(100))  # Intenção detectada
+    importance = Column(Float, default=0.5)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_message_session', 'session_id'),
     )
 
 

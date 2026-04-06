@@ -3,20 +3,20 @@ from typing import Dict, List
 import os
 
 class Settings(BaseSettings):
-    openai_api_key: str = ""  # Opcional se usar Ollama
     database_url: str
-    secret_key: str = "dev-secret-key-change-in-production"  # Opcional: usado para assinar tokens/cookies (não usado atualmente)
+    secret_key: str = "dev-secret-key-change-in-production"
 
-    # Campos para Ollama (lidos pelo llm_client via os.getenv, mas definidos aqui para evitar erro do Pydantic)
-    llm_provider: str = "openai"
-    llm_model: str = "gpt-4"
+    # Configurações Ollama
+    llm_provider: str = "ollama"
+    llm_model: str = "llama2"
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str = "ollama"
+    ollama_model: str = "llama2"
 
     class Config:
         env_file = ".env"
         case_sensitive = False
-        extra = "ignore"  # Ignora campos extras no .env que não estão definidos aqui
+        extra = "ignore"
 
 settings = Settings()
 

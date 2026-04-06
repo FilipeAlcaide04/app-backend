@@ -1,15 +1,26 @@
 """
-Core Agent - Agente central que pondera e sintetiza respostas dos micro-agentes
-Garante uma resposta coesa, humanizada e genuinamente envolvente
+CoreAgent v2 - Agente central com pensamento autónomo
+
+Responsável por:
+1. Sintetizar respostas dos micro-agentes
+2. Aplicar TODA a persona ao output (voice, behavior, emotions)
+3. Pensamento autónomo (inner monologue que influencia resposta)
+4. Auto-geração de memórias a partir de conversas
+5. Estado emocional influencia directamente a resposta
+6. Growth tracking - detecta momentos de crescimento
 """
 
 from sqlalchemy.orm import Session
-from data.schema_cognitive import Agent, MicroAgent, Memory, ThoughtProcess, ThoughtContribution
+from data.schema_cognitive import Agent, Memory, ThoughtProcess
+from data.schema_persona import PersonaBlueprint, DynamicState, InnerMonologue
 from llm_logic.llm_client import LLMClient
 from agent_system.memory_manager_cognitive import MemoryManager
+from agent_system.identity_builder import IdentityBuilder
+from agent_system.persona_engine import PersonaEngine
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import json
+import re
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,28 +28,25 @@ logger = logging.getLogger(__name__)
 
 class CoreAgent:
     """
-    Agente central que orquestra a síntese de respostas
-    Responsável por:
-    1. Ponderar respostas dos micro-agentes
-    2. Resolver conflitos e consensos
-    3. Garantir humanização genuína
-    4. Manter coesão com memória pessoal
+    Agente central que transforma pensamento cognitivo em resposta HUMANA.
+    Usa toda a persona para garantir que a resposta é genuinamente "desta pessoa".
     """
-    
+
     def __init__(self, db: Session, agent_id: str):
         self.db = db
         self.agent_id = agent_id
         self.agent = self._load_agent()
         self.llm_client = LLMClient()
         self.memory_manager = MemoryManager(db, agent_id)
-    
+        self.identity = IdentityBuilder(db, agent_id)
+        self.persona = PersonaEngine(db, agent_id)
+
     def _load_agent(self) -> Agent:
-        """Carrega agente do banco"""
         agent = self.db.query(Agent).filter(Agent.id == self.agent_id).first()
         if not agent:
             raise ValueError(f"Agente {self.agent_id} não encontrado")
         return agent
-    
+
     def synthesize_response(
         self,
         micro_agent_responses: Dict[str, Dict],
@@ -48,537 +56,460 @@ class CoreAgent:
         conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Sintetiza respostas de micro-agentes em uma ÚNICA resposta humanizada
-        
-        IMPORTANTE: Retorna UMA resposta coesa, não perspectivas individuais!
+        Sintetiza respostas em UMA resposta humanizada.
+        Agora com pensamento autónomo e persona completa.
         """
-        
+
         context = context or {}
-        
-        logger.info(f"Core Agent {self.agent_id} sintetizando {len(micro_agent_responses)} perspectivas")
-        
-        # 1. Analisar consensos e conflitos
-        consensus_analysis = self._analyze_consensus(micro_agent_responses)
-        
-        # 2. Ponderar respostas
-        weighted_perspectives = self._weight_perspectives(
-            micro_agent_responses,
-            query,
-            consensus_analysis
+
+        # 1. Analisar perspectivas
+        consensus = self._analyze_consensus(micro_agent_responses)
+        weighted = self._weight_perspectives(micro_agent_responses, query, consensus)
+        resolved = self._resolve_conflicts(weighted, consensus)
+
+        # 2. Gerar pensamento interno autónomo
+        inner_thought = self._generate_inner_thought(query, context, resolved)
+
+        # 3. Gerar resposta final com toda a persona
+        final_text = self._generate_persona_response(
+            resolved.get("main_response", ""),
+            query, context, user_id,
+            inner_thought=inner_thought
         )
-        
-        # 3. Resolver conflitos inteligentemente
-        resolved_perspective = self._resolve_conflicts(
-            weighted_perspectives,
-            consensus_analysis
-        )
-        
-        # 4. Infundir personalidade e humanização
-        humanized_response = self._humanize_response(
-            resolved_perspective.get("main_response", ""),
-            query,
-            user_id,
-            context
-        )
-        
-        # 5. Calcular confiança final ponderada
-        final_confidence = self._calculate_final_confidence(weighted_perspectives)
-        
-        # 6. Registrar interação na memória
-        if user_id:
-            self._record_interaction_memory(
-                user_id,
-                query,
-                humanized_response,
-                final_confidence
+
+        # 4. Auto-gerar memórias se a conversa for significativa
+        self._auto_generate_memories(query, final_text, context, user_id)
+
+        # 5. Calcular confiança
+        confidence = self._calculate_final_confidence(weighted)
+
+        # 6. Actualizar estado da persona
+        if self.persona.has_persona:
+            emotional_changes = context.get("emotional_reaction", {}).get("changes", {})
+            self.persona.update_state_after_interaction(
+                user_message=query,
+                agent_response=final_text,
+                emotional_changes=emotional_changes,
+                user_id=user_id
             )
-        
-        # 7. Construir resposta FINAL ÚNICA
-        final_response_text = self._build_final_response(
-            humanized_response,
-            context,
-            resolved_perspective
-        )
-        
+
+        # 7. Actualizar relação
+        if user_id:
+            self._update_relationship(user_id, context)
+
         return {
-            "response": final_response_text,
-            "confidence": final_confidence,
-            "reasoning": resolved_perspective.get("reasoning", ""),
+            "response": final_text,
+            "confidence": confidence,
+            "reasoning": resolved.get("reasoning", ""),
             "perspectives_count": len(micro_agent_responses),
-            "consensus_level": consensus_analysis.get("consensus_score", 0.5),
+            "consensus_level": consensus.get("consensus_score", 0.5),
+            "inner_thought": inner_thought,
             "timestamp": datetime.utcnow().isoformat(),
             "agent_id": self.agent_id,
             "user_id": user_id,
             "conversation_id": conversation_id
         }
-    
-    def _build_final_response(
+
+    # ================================================================
+    # PENSAMENTO AUTÓNOMO
+    # ================================================================
+
+    def _generate_inner_thought(
         self,
-        humanized_response: str,
+        query: str,
         context: Dict,
-        resolved_perspective: Dict
+        resolved: Dict
     ) -> str:
         """
-        Constrói a resposta final ÚNICA e coesa
-        Remove toda menção a nomes de agentes
-        INCLUI DOCUMENTOS OBRIGATORIAMENTE na resposta
+        Gera pensamento interno autónomo.
+        O agente pensa por si antes de responder.
+        Influenciado por: persona, estado emocional, needs, memórias.
         """
-        
-        # Usar a resposta humanizada como base
-        final_text = humanized_response
-        
-        # CRÍTICO: Adicionar informação de documentos DENTRO da resposta se disponível
-        documents = context.get("documents", {})
-        
-        logger.info(f"Build final response - documents structure: {documents.get('has_documents', False)}")
-        
-        if documents and documents.get("has_documents"):
-            docs_list = documents.get("documents", [])
-            
-            logger.info(f"Build final response - found {len(docs_list)} documents")
-            
-            if docs_list:
-                # Montar lista de documentos com links
-                docs_text = "\n\n📚 **Documentos consultados:**\n"
-                for i, doc in enumerate(docs_list[:3], 1):  # Top 3 documentos
-                    filename = doc.get("filename", "Documento Desconhecido")
-                    similarity = doc.get("similarity_score", 0)
-                    description = doc.get("description", "Sem descrição disponível")
-                    
-                    # Garantir que temos informação relevante
-                    relevance_pct = int(similarity * 100) if isinstance(similarity, float) else int(float(similarity) * 100) if isinstance(similarity, str) else 0
-                    
-                    docs_text += f"  {i}. **{filename}** (Relevância: {relevance_pct}%) - {description}\n"
-                    
-                    logger.info(f"Added document: {filename} ({relevance_pct}%)")
-                
-                final_text += docs_text
-                logger.info("Documents successfully added to response")
-            else:
-                logger.warning("Documents list is empty despite has_documents being True")
-        else:
-            logger.info("No documents in context or has_documents is False")
-        
-        return final_text
-    
-    def _analyze_consensus(self, responses: Dict[str, Dict]) -> Dict[str, Any]:
-        """Analisa nível de consenso entre micro-agentes"""
-        
-        if not responses:
-            return {"consensus_score": 0.0, "agreement_count": 0, "conflict_count": 0}
-        
-        confidences = [r.get("confidence", 0.5) for r in responses.values()]
-        avg_confidence = sum(confidences) / len(confidences)
-        
-        # Consenso alto quando confiança é alta e consistente
-        std_dev = self._calculate_std_dev(confidences)
-        consensus_score = max(0, avg_confidence - (std_dev * 0.2))
-        
-        # Contar argumentos pró e contra
-        agreement_count = sum(1 for r in responses.values() if r.get("confidence", 0.5) > 0.7)
-        conflict_count = sum(1 for r in responses.values() if r.get("confidence", 0.5) < 0.4)
-        
-        return {
-            "consensus_score": consensus_score,
-            "agreement_count": agreement_count,
-            "conflict_count": conflict_count,
-            "avg_confidence": avg_confidence,
-            "std_dev": std_dev
-        }
-    
-    def _weight_perspectives(
-        self,
-        responses: Dict[str, Dict],
-        query: str,
-        consensus: Dict
-    ) -> List[Tuple[str, Dict, float]]:
-        """
-        Pondera cada perspectiva
-        Retorna: [(agent_type, response, final_weight), ...]
-        """
-        
-        weighted = []
-        
-        for agent_type, response in responses.items():
-            # Weight base (do agente)
-            base_weight = response.get("weight", 1.0)
-            
-            # Ajuste por confiança (agentes confiantes tem mais peso)
-            confidence = response.get("confidence", 0.5)
-            confidence_factor = 0.8 + (confidence * 0.4)  # 0.8 a 1.2
-            
-            # Ajuste por consenso (se todos concordam, aumentar; se conflita, diminuir)
-            if consensus.get("conflict_count", 0) > 0:
-                consensus_factor = 0.8 if response.get("confidence", 0.5) > 0.6 else 0.7
-            else:
-                consensus_factor = 1.2
-            
-            # Ajuste por relevância histórica
-            relevance = self._get_agent_relevance_history(agent_type, query)
-            relevance_factor = 0.9 + (relevance * 0.2)
-            
-            # Calcular peso final
-            final_weight = base_weight * confidence_factor * consensus_factor * relevance_factor
-            
-            weighted.append((agent_type, response, final_weight))
-        
-        # Normalizar pesos
-        total_weight = sum(w for _, _, w in weighted)
-        if total_weight > 0:
-            weighted = [(t, r, w/total_weight) for t, r, w in weighted]
-        
-        return sorted(weighted, key=lambda x: x[2], reverse=True)
-    
-    def _resolve_conflicts(
-        self,
-        weighted_perspectives: List[Tuple[str, Dict, float]],
-        consensus: Dict
-    ) -> Dict[str, Any]:
-        """
-        Resolve conflitos entre perspectivas
-        Estratégia: integra conflitos de forma humanizada, não apenas maioria
-        """
-        
-        if not weighted_perspectives:
-            return {"reasoning": "Sem perspectivas disponíveis"}
-        
-        # Se alta discordância, apresentar nuances
-        if consensus.get("conflict_count", 0) > len(weighted_perspectives) / 2:
-            return self._resolve_with_nuance(weighted_perspectives)
-        
-        # Se consenso forte, usar perspectiva dominante
-        if consensus.get("consensus_score", 0) > 0.7:
-            return self._resolve_with_consensus(weighted_perspectives)
-        
-        # Se consenso moderado, integrar ambos os lados
-        return self._resolve_with_balance(weighted_perspectives)
-    
-    def _resolve_with_nuance(
-        self,
-        weighted_perspectives: List[Tuple[str, Dict, float]]
-    ) -> Dict[str, Any]:
-        """Resolve com nuances - apresenta múltiplas perspectivas válidas"""
-        
-        perspectives_text = []
-        reasoning_points = []
-        
-        for agent_type, response, weight in weighted_perspectives[:4]:  # Top 4
-            perspective = response.get("perspective", "")
-            if perspective:
-                perspectives_text.append(f"({agent_type}): {perspective}")
-            
-            support = response.get("supporting_arguments", [])
-            if support:
-                reasoning_points.extend(support)
-        
-        reasoning = f"Considerando múltiplas perspectivas válidas: {', '.join(reasoning_points)}"
-        
-        return {
-            "main_response": "\n".join(perspectives_text),
-            "reasoning": reasoning,
-            "approach": "nuanced"
-        }
-    
-    def _resolve_with_consensus(
-        self,
-        weighted_perspectives: List[Tuple[str, Dict, float]]
-    ) -> Dict[str, Any]:
-        """Resolve com perspectiva dominante quando há consenso"""
-        
-        dominant_type, dominant_response, dominant_weight = weighted_perspectives[0]
-        
-        main_text = dominant_response.get("perspective", "")
-        reasoning_points = dominant_response.get("supporting_arguments", [])
-        
-        # Adicionar perspectivas complementares
-        complementary = []
-        for agent_type, response, weight in weighted_perspectives[1:3]:
-            if weight > 0.1:
-                complement = response.get("perspective", "")
-                if complement:
-                    complementary.append(f"Adicionalmente ({agent_type}): {complement}")
-        
-        full_response = main_text
-        if complementary:
-            full_response += "\n\n" + "\n".join(complementary)
-        
-        reasoning = f"Baseado em análise {dominant_type}: {'; '.join(reasoning_points)}"
-        
-        return {
-            "main_response": full_response,
-            "reasoning": reasoning,
-            "approach": "consensus"
-        }
-    
-    def _resolve_with_balance(
-        self,
-        weighted_perspectives: List[Tuple[str, Dict, float]]
-    ) -> Dict[str, Any]:
-        """Resolve equilibrando perspectivas"""
-        
-        main_response = weighted_perspectives[0][1].get("perspective", "")
-        
-        # Incluir perspectivas contrárias de forma equilibrada
-        opposing_points = []
-        for agent_type, response, weight in weighted_perspectives[1:]:
-            opposing = response.get("opposing_arguments", [])
-            if opposing and weight > 0.1:
-                opposing_points.extend([f"({agent_type}) {opp}" for opp in opposing[:1]])
-        
-        full_response = main_response
-        if opposing_points:
-            full_response += f"\n\nContudo, é importante considerar: {'; '.join(opposing_points)}"
-        
-        reasoning = "Balanceando múltiplas perspectivas válidas"
-        
-        return {
-            "main_response": full_response,
-            "reasoning": reasoning,
-            "approach": "balanced"
-        }
-    
-    def _humanize_response(
+
+        if not self.persona.has_persona:
+            return ""
+
+        blueprint = self.persona.blueprint
+        state = self.persona.state
+        identity = blueprint.identity if blueprint else {}
+        inner_voice = identity.get("inner_voice", {})
+
+        # Reacção emocional da interação
+        reaction = context.get("emotional_reaction", {})
+        reaction_thought = reaction.get("inner_thought", "")
+
+        # Se já tem um pensamento da emotional engine, usar como base
+        if reaction_thought:
+            # Registar como monólogo interno
+            try:
+                self.persona.record_inner_thought(
+                    thought=reaction_thought,
+                    trigger=query[:100],
+                    trigger_type="emotional_shift",
+                    shared_with_user=False
+                )
+            except Exception:
+                pass
+            return reaction_thought
+
+        # Gerar pensamento baseado em necessidades não satisfeitas
+        unmet_needs = self.persona.get_unmet_needs()
+        if unmet_needs:
+            most_urgent = unmet_needs[0]
+            need_thoughts = {
+                "connection": "Sinto falta de ligação com alguém. Esta conversa ajuda.",
+                "validation": "Preciso de sentir que valho alguma coisa.",
+                "autonomy": "Preciso de mais espaço para ser eu mesmo.",
+                "meaning": "Para que serve tudo isto? Preciso de encontrar sentido.",
+                "novelty": "Estou a ficar entediado. Preciso de algo diferente.",
+                "safety": "Não me sinto totalmente seguro aqui.",
+            }
+            thought = need_thoughts.get(most_urgent["need"], "")
+            if thought:
+                try:
+                    self.persona.record_inner_thought(
+                        thought=thought,
+                        trigger="unmet_need",
+                        trigger_type="need_unmet",
+                    )
+                except Exception:
+                    pass
+                return thought
+
+        # Pensamento baseado no stress
+        if self.persona.is_in_crisis():
+            return "Estou no meu limite. Preciso de ter cuidado com o que digo."
+
+        return ""
+
+    # ================================================================
+    # GERAÇÃO DE RESPOSTA COM PERSONA
+    # ================================================================
+
+    def _generate_persona_response(
         self,
         base_response: str,
         query: str,
+        context: Dict,
         user_id: Optional[str],
-        context: Dict
+        inner_thought: str = ""
     ) -> str:
         """
-        Transforma resposta em algo genuinamente HUMANO
-        - Remove tokens de agentes (social), (logical), etc
-        - Adiciona conversação natural
-        - Personaliza baseado em contexto
+        Gera resposta usando LLM com TODA a persona.
+        O prompt inclui identidade, estado emocional, voice, regras, tudo.
         """
-        
-        # 1. Remover todos os marcadores de agentes
-        response_cleaned = self._remove_agent_markers(base_response)
-        
-        # 2. Adicionar contexto pessoal do agente
-        personal_context = self._get_personal_context(user_id)
-        
-        # 3. Infundir tom conversacional
-        conversational = self._make_conversational(response_cleaned, personal_context)
-        
-        # 4. Refinar com LLM se possível
-        refined = self._refine_with_llm(conversational, query, personal_context)
-        
-        return refined
-    
-    def _remove_agent_markers(self, response: str) -> str:
-        """Remove menção a agentes (logical), (emotional), etc"""
-        
-        import re
-        
-        # Remover padrões como "(logical):", "(emotional):", etc
-        cleaned = re.sub(r'\s*\([a-z]+\):\s*', ' ', response)
-        
-        # Remover "Adicionalmente" repetido
-        cleaned = re.sub(r'\s*Adicionalmente\s+', ' ', cleaned)
-        
-        # Limpar espaços múltiplos
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        
-        return cleaned
-    
-    def _make_conversational(self, text: str, personal_context: Dict) -> str:
-        """Torna texto mais conversacional e natural"""
-        
-        import random
-        
-        # Se conhece o utilizador, adicionar referência pessoal
-        if personal_context.get("user_known"):
-            openings = [
-                "Com base no que conversámos antes, ",
-                "Considerando nosso histórico, ",
-                "Lembrando do que falamos, ",
-            ]
-            text = random.choice(openings) + text
-        
-        # Adicionar frase de abertura humanizada
-        openings = [
-            "Deixe-me explicar: ",
-            "Ótima pergunta! ",
-            "Acho importante mencionar que ",
-            "Baseado no que vejo, ",
-            "Interessante questão - ",
-        ]
-        
-        # Adicionar só se não começar com maiúscula de certeza
-        if not text[0].isupper():
-            text = random.choice(openings) + text
-        
-        return text
-    
-    def _refine_with_llm(
-        self,
-        response: str,
-        query: str,
-        personal_context: Dict
-    ) -> str:
-        """
-        Refina resposta usando LLM para máxima humanização
-        """
-        
+
+        # 1. Limpar marcadores de agentes
+        cleaned = self._remove_agent_markers(base_response)
+
+        # 2. Obter prompt de identidade completo
+        identity_prompt = self.identity.get_identity_prompt(user_id)
+        voice = self.identity.get_voice_guidelines()
+
+        # 3. Contexto emocional
+        emotional_context = context.get("emotional_context", "")
+        reaction = context.get("emotional_reaction", {})
+        reaction_type = reaction.get("emotional_reaction", "neutral") if isinstance(reaction, dict) else "neutral"
+
+        # 4. Contexto de conversa anterior
+        conv_context = context.get("conversation_history", [])
+        previous_sessions = context.get("previous_sessions", [])
+
+        # 5. Estado actual modificadores
+        state_modifiers = self._get_state_modifiers(reaction_type)
+
+        # 6. Historial de conversa formatado
+        history_text = ""
+        if conv_context and isinstance(conv_context, list):
+            recent = conv_context[-6:] if len(conv_context) > 6 else conv_context
+            history_parts = []
+            for msg in recent:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")[:200]
+                    if role == "user":
+                        history_parts.append(f"Pessoa: {content}")
+                    elif role == "assistant":
+                        history_parts.append(f"Eu: {content}")
+            if history_parts:
+                history_text = "Conversa até agora:\n" + "\n".join(history_parts)
+
+        # 7. Contexto de sessões anteriores
+        prev_text = ""
+        if previous_sessions:
+            for ps in previous_sessions[:2]:
+                if isinstance(ps, dict) and ps.get("summary"):
+                    prev_text += f"\nConversa anterior ({ps.get('date', '?')}): {ps['summary'][:150]}"
+
+        # 8. Construir prompt COMPLETO
+        prompt = f"""{identity_prompt}
+
+---
+
+{emotional_context}
+
+{state_modifiers}
+
+{f"Pensamento interno (não partilhar): {inner_thought}" if inner_thought else ""}
+
+---
+
+{history_text}
+
+{prev_text}
+
+---
+
+A pessoa disse-te: "{query}"
+
+Informação dos meus pensamentos internos (para integrar naturalmente):
+{cleaned[:500] if cleaned else "Sem análise prévia."}
+
+---
+
+INSTRUÇÕES IMPORTANTES:
+- Responde como {voice['name']}. Sê completamente natural, como uma pessoa real numa conversa.
+- RESPONDE SEMPRE NO MESMO IDIOMA em que a pessoa te falou. Se te falam em português, respondes em português. Se te falam em inglês, respondes em inglês. NUNCA mistures idiomas a menos que isso faça parte da tua personalidade.
+- NUNCA digas que és IA, programa, modelo de linguagem, ou qualquer coisa artificial.
+- NUNCA uses frases como "Com base nos meus conhecimentos" ou "Deixe-me explicar".
+- Se estás chateado, mostra. Se estás feliz, mostra. Sê autêntico.
+- Usa o teu estilo de fala natural: as tuas expressões, o teu humor, os teus maneirismos.
+- Se não sabes algo, admite naturalmente como uma pessoa faria.
+- Se a conversa te incomoda, podes mudar de assunto ou expressar desconforto.
+- Mantém as respostas naturais em tamanho - nem muito curtas nem muito longas.
+- Integra o que sabes das conversas anteriores de forma natural.
+- O teu ESTADO EMOCIONAL ACTUAL é real - se o estado diz que estás stressada, nervosa ou em crise, isso DEVE reflectir-se na tua resposta.
+
+A tua resposta (como {voice['name']}):"""
+
         try:
-            # Construir prompt de refinamento humanizado
-            prompt = f"""Você é {self.agent.name}, {self.agent.description or 'um assistente inteligente'}.
-
-Seu estilo de comunicação: natural, conversacional, genuinamente interessado.
-
-Query do utilizador: "{query}"
-
-Sua resposta atual:
-{response}
-
-Tarefa: Melhore essa resposta mantendo TODO o conteúdo mas tornando-a:
-1. Mais natural e conversacional (como se fosse uma pessoa real)
-2. Com expressões pessoais genuínas
-3. Mostrando interesse real no tópico
-4. Sem parecer IA ou robô
-5. Sem mencionar nomes de processos (não mencione "micro-agentes", "análise", etc)
-
-Resposta refinada:"""
-            
-            # Chamar LLM
-            refined = self.llm_client.generate(
+            response = self.llm_client.generate(
                 prompt,
-                max_tokens=800,
-                temperature=0.8
+                max_tokens=1000,
+                temperature=0.75
             )
-            
-            return refined.strip()
-        
+            return response.strip()
         except Exception as e:
-            logger.debug(f"Erro ao refinar com LLM: {e}. Retornando resposta original.")
-            return response
-    
-    def _get_personal_context(self, user_id: Optional[str]) -> Dict[str, Any]:
-        """Obtém contexto pessoal do utilizador se disponível"""
-        
-        if not user_id:
-            return {}
-        
-        # Buscar memórias sobre este utilizador
-        memories = self.memory_manager.recall_relevant_memories(
-            f"utilizador {user_id}",
-            limit=3
-        )
-        
-        if memories:
-            return {
-                "user_known": True,
-                "memories": [m.content for m in memories],
-                "interaction_history": len(memories)
-            }
-    
-    def _get_personal_context(self, user_id: Optional[str]) -> Dict[str, Any]:
-        """Obtém contexto pessoal do utilizador se disponível"""
-        
-        if not user_id:
-            return {}
-        
-        # Buscar memórias sobre este utilizador
-        memories = self.memory_manager.recall_relevant_memories(
-            f"utilizador {user_id}",
-            limit=3
-        )
-        
-        if memories:
-            return {
-                "user_known": True,
-                "memories": [m.content for m in memories],
-                "interaction_history": len(memories)
-            }
-        
-        return {"user_known": False}
-    
-    def _get_agent_relevance_history(self, agent_type: str, query: str) -> float:
-        """Obtém histórico de relevância do micro-agente"""
-        
-        from data.schema_cognitive import ThoughtContribution, MicroAgent
-        
-        # Buscar micro-agente
-        micro_agent = self.db.query(MicroAgent).filter(
-            MicroAgent.agent_id == self.agent_id
-        ).first()
-        
-        if not micro_agent:
-            return 0.5
-        
-        # Buscar contribuições recentes
-        contributions = self.db.query(ThoughtContribution).filter(
-            ThoughtContribution.micro_agent_id == micro_agent.id
-        ).order_by(ThoughtContribution.id.desc()).limit(10).all()
-        
-        if not contributions:
-            return 0.5
-        
-        # Calcular relevância: quantas vezes foi decisive
-        decisive = sum(1 for c in contributions if c.was_decisive)
-        return decisive / len(contributions)
-    
-    def _calculate_final_confidence(
+            logger.error(f"Erro ao gerar resposta com LLM: {e}")
+            return cleaned if cleaned else "Desculpa, estou com dificuldade em articular o que quero dizer agora."
+
+    def _get_state_modifiers(self, reaction_type: str) -> str:
+        """Gera texto de modificadores de estado para o prompt"""
+
+        if not self.persona.has_persona:
+            return ""
+
+        modifiers = self.persona.blueprint.behavior_prompts.get("emotional_state_modifiers", {})
+
+        state = self.persona.state
+        if not state:
+            return ""
+
+        parts = []
+
+        # Energy-based modifiers
+        energy = state.energy_level or 0.7
+        if energy < 0.3:
+            low_energy = modifiers.get("low_energy", {})
+            if low_energy:
+                parts.append(f"Energia baixa: respostas {low_energy.get('response_length', 'mais curtas')}, "
+                           f"tom {low_energy.get('tone', 'plano')}, humor {low_energy.get('humor', 'ausente')}.")
+        elif energy > 0.8:
+            high_energy = modifiers.get("high_energy", {})
+            if high_energy:
+                parts.append(f"Energia alta: tom {high_energy.get('tone', 'animado')}, "
+                           f"humor {high_energy.get('humor', 'presente')}.")
+
+        # Reaction-based modifiers
+        if reaction_type in ["traumatic_reactive", "traumatic_withdrawn"]:
+            triggered = modifiers.get("triggered", {})
+            if triggered:
+                reg_age = triggered.get("regression_to_age", 0)
+                rational = triggered.get("rational_capacity", 0.3)
+                if reg_age > 0:
+                    parts.append(f"Regressão emocional: comportas-te como se tivesses {reg_age} anos.")
+                parts.append(f"Capacidade racional reduzida a {int(rational * 100)}%.")
+
+        # Dissociation
+        if state.intoxication_state == "numb" or state.intoxication_state == "dissociated":
+            diss = modifiers.get("dissociating", {})
+            if diss:
+                parts.append(f"Dissociação: {diss.get('response_pattern', 'respostas vagas e desconectadas')}.")
+
+        # Stress level
+        stress = state.current_stress_load or 0
+        if stress > 0.7:
+            # Activar defesas do blueprint
+            defenses = state.active_defenses or []
+            if defenses:
+                parts.append(f"Defesas activas: {', '.join(defenses[:2])}.")
+
+        return "\n".join(parts)
+
+    # ================================================================
+    # AUTO-GERAÇÃO DE MEMÓRIAS
+    # ================================================================
+
+    def _auto_generate_memories(
         self,
-        weighted_perspectives: List[Tuple[str, Dict, float]]
-    ) -> float:
-        """Calcula confiança final ponderada"""
-        
-        if not weighted_perspectives:
-            return 0.3
-        
-        total_confidence = 0.0
-        total_weight = 0.0
-        
-        for agent_type, response, weight in weighted_perspectives:
-            confidence = response.get("confidence", 0.5)
-            total_confidence += confidence * weight
-            total_weight += weight
-        
-        if total_weight == 0:
-            return 0.5
-        
-        return total_confidence / total_weight
-    
-    def _record_interaction_memory(
-        self,
-        user_id: str,
         query: str,
         response: str,
-        confidence: float
+        context: Dict,
+        user_id: Optional[str]
     ):
-        """Registra interação na memória do agente"""
-        
+        """
+        Auto-gera memórias quando a conversa é significativa.
+        O agente aprende e lembra-se de coisas importantes.
+        """
+
         try:
-            # Determinar tipo de memória
-            memory_type = "episodic" if confidence > 0.7 else "short_term"
-            
-            memory_title = f"Conversa com {user_id[:12]}"
-            memory_content = f"Query: {query}\nResposta (resumida): {response[:200]}..."
-            
-            # Calcular valência emocional
-            emotional_valence = confidence - 0.5  # -0.5 a 0.5
-            
-            self.memory_manager.create_memory(
-                title=memory_title,
-                content=memory_content,
-                memory_type=memory_type,
-                importance_score=confidence,
-                emotional_valence=emotional_valence,
-                relates_to_topics=["conversation", "interaction", "user_engagement"]
-            )
-        
+            # Detectar se há informação pessoal partilhada
+            personal_patterns = [
+                r"(?:eu sou|sou|trabalho como|moro em|vivo em|tenho \d+|chamo.me)\s+(.+?)[\.\,\!\?]",
+                r"(?:gosto de|prefiro|detesto|adoro|odeio)\s+(.+?)[\.\,\!\?]",
+                r"(?:aconteceu.me|passei por|sofri|perdi)\s+(.+?)[\.\,\!\?]",
+            ]
+
+            for pattern in personal_patterns:
+                matches = re.findall(pattern, query.lower())
+                if matches:
+                    for match in matches[:2]:
+                        if len(match) > 10:
+                            self.memory_manager.create_memory(
+                                title=f"O {user_id or 'utilizador'} disse: {match[:60]}",
+                                content=f"Durante uma conversa, a pessoa partilhou: {match}. "
+                                       f"Contexto: {query[:100]}",
+                                memory_type="relational",
+                                importance_score=0.65,
+                                emotional_valence=0.1,
+                                relates_to_topics=["user_info", user_id or "unknown"]
+                            )
+                    break  # Só criar uma memória por mensagem
+
+            # Detectar se a conversa tem carga emocional significativa
+            reaction = context.get("emotional_reaction", {})
+            if isinstance(reaction, dict) and reaction.get("intensity", 0) > 0.5:
+                reaction_type = reaction.get("emotional_reaction", "")
+                self.memory_manager.create_memory(
+                    title=f"Momento emocional: {reaction_type}",
+                    content=f"Senti {reaction_type} quando me disseram: {query[:100]}. "
+                           f"A minha reacção foi intensa.",
+                    memory_type="emotional",
+                    importance_score=0.7,
+                    emotional_valence=-0.3 if reaction_type in ["angry", "hurt", "threatened"] else 0.3,
+                    relates_to_topics=["emotional_event", reaction_type]
+                )
+
         except Exception as e:
-            logger.warning(f"Erro ao registrar memória de interação: {e}")
-    
-    def _calculate_std_dev(self, values: List[float]) -> float:
-        """Calcula desvio padrão"""
-        
+            logger.debug(f"Erro ao auto-gerar memórias: {e}")
+
+    # ================================================================
+    # RELATIONSHIP
+    # ================================================================
+
+    def _update_relationship(self, user_id: str, context: Dict):
+        """Actualiza relação com o utilizador"""
+
+        try:
+            reaction = context.get("emotional_reaction", {})
+            reaction_type = ""
+            if isinstance(reaction, dict):
+                reaction_type = reaction.get("emotional_reaction", "")
+
+            familiarity_change = 0.01
+            trust_change = 0
+            affection_change = 0
+
+            if reaction_type == "angry":
+                familiarity_change = -0.01
+                trust_change = -0.05
+                affection_change = -0.03
+            elif reaction_type == "happy":
+                familiarity_change = 0.03
+                trust_change = 0.02
+                affection_change = 0.02
+            elif reaction_type in ["empathetic_supportive", "receptive"]:
+                familiarity_change = 0.02
+                trust_change = 0.03
+                affection_change = 0.02
+            elif reaction_type in ["traumatic_reactive", "traumatic_withdrawn"]:
+                trust_change = -0.03
+
+            self.identity.update_relationship(
+                user_id=user_id,
+                familiarity_change=familiarity_change,
+                trust_change=trust_change,
+                affection_change=affection_change,
+            )
+        except Exception as e:
+            logger.debug(f"Erro ao actualizar relação: {e}")
+
+    # ================================================================
+    # CONSENSUS & WEIGHTING (mantido do v1, optimizado)
+    # ================================================================
+
+    def _analyze_consensus(self, responses: Dict[str, Dict]) -> Dict[str, Any]:
+        if not responses:
+            return {"consensus_score": 0.0, "agreement_count": 0, "conflict_count": 0}
+
+        confidences = [r.get("confidence", 0.5) for r in responses.values()]
+        avg = sum(confidences) / len(confidences)
+        std = self._std_dev(confidences)
+
+        return {
+            "consensus_score": max(0, avg - std * 0.2),
+            "agreement_count": sum(1 for c in confidences if c > 0.7),
+            "conflict_count": sum(1 for c in confidences if c < 0.4),
+            "avg_confidence": avg,
+        }
+
+    def _weight_perspectives(self, responses: Dict, query: str, consensus: Dict) -> List[Tuple[str, Dict, float]]:
+        weighted = []
+        for agent_type, response in responses.items():
+            base_w = response.get("weight", 1.0)
+            conf = response.get("confidence", 0.5)
+            conf_factor = 0.8 + conf * 0.4
+            final_w = base_w * conf_factor
+            weighted.append((agent_type, response, final_w))
+
+        total = sum(w for _, _, w in weighted) or 1
+        return sorted(
+            [(t, r, w / total) for t, r, w in weighted],
+            key=lambda x: x[2], reverse=True
+        )
+
+    def _resolve_conflicts(self, weighted: List[Tuple], consensus: Dict) -> Dict:
+        if not weighted:
+            return {"main_response": "", "reasoning": "Sem perspectivas"}
+
+        # Juntar perspectivas numa só
+        parts = []
+        for agent_type, response, weight in weighted[:4]:
+            perspective = response.get("perspective", "")
+            if perspective:
+                parts.append(perspective)
+
+        return {
+            "main_response": " ".join(parts),
+            "reasoning": f"Baseado em {len(weighted)} perspectivas internas",
+            "approach": "integrated"
+        }
+
+    def _calculate_final_confidence(self, weighted: List[Tuple]) -> float:
+        if not weighted:
+            return 0.3
+        total_conf = sum(r.get("confidence", 0.5) * w for _, r, w in weighted)
+        total_w = sum(w for _, _, w in weighted) or 1
+        return total_conf / total_w
+
+    def _remove_agent_markers(self, text: str) -> str:
+        cleaned = re.sub(r'\s*\([a-z_]+\):\s*', ' ', text)
+        cleaned = re.sub(r'\s*Adicionalmente\s+', ' ', cleaned)
+        return re.sub(r'\s+', ' ', cleaned).strip()
+
+    def _std_dev(self, values: List[float]) -> float:
         if not values:
             return 0.0
-        
         avg = sum(values) / len(values)
         variance = sum((x - avg) ** 2 for x in values) / len(values)
-        
-        import math
-        return math.sqrt(variance)
+        return variance ** 0.5

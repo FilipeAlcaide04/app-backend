@@ -33,7 +33,7 @@ class Agent(Base):
     behavior_specs = Column(Text, nullable=True)  # JSON
     
     # Configurações de modelo específicas (substitui config_json)
-    model_name = Column(String, default="gpt-4-turbo-preview")
+    model_name = Column(String, default="llama2")
     temperature = Column(Float, default=0.7)
     max_tokens = Column(Integer, default=2000)
     top_p = Column(Float, default=1.0)
