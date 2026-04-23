@@ -11,6 +11,12 @@ Novidades v2:
 - Histórico de conversas real
 """
 
+
+"""
+Como correr: python -m uvicorn api.api:app --reload
+"""
+
+
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +30,7 @@ from datetime import datetime
 from data.database_cognitive import init_cognitive_db, get_db_session
 from data.schema_cognitive import Agent
 from data.schema_persona import PersonaBlueprint, DynamicState
+import data.schema_auth  # noqa: F401 - registar modelo User na Base
 
 # Services
 from agent_system.agent_service_cognitive import AgentServiceCognitive
@@ -57,6 +64,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Auth Router
+from api.auth import router as auth_router
+app.include_router(auth_router)
+
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -71,6 +82,15 @@ async def startup_event():
     logger.info("INICIANDO SERVIDOR - HUMAN SIMULATION API v3.0")
     logger.info("=" * 80)
     preload_embedding_model()
+
+    # Seed admin user
+    from api.auth import seed_admin_user
+    db = get_db_session(DATABASE_URL)
+    try:
+        seed_admin_user(db)
+    finally:
+        db.close()
+
     logger.info("=" * 80 + "\n")
 
 
