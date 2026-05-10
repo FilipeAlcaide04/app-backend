@@ -158,6 +158,7 @@ class CreatePersonaRequest(BaseModel):
     # Configurações simplificadas (alternativa ao blueprint completo)
     personality_traits: Optional[Dict] = None  # Big Five simples
     thinking_style: Optional[str] = "balanced"
+    decision_making_approach: Optional[str] = "collaborative"
     debate_intensity: Optional[float] = 0.7
 
     # Micro-agentes
@@ -264,7 +265,11 @@ async def list_personas(db: Session = Depends(get_db)):
 
 
 @app.post("/personas", tags=["Personas"])
-async def create_persona(request: CreatePersonaRequest, db: Session = Depends(get_db)):
+async def create_persona(
+    request: CreatePersonaRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Cria um humano virtual COMPLETO com persona detalhada.
 
@@ -295,11 +300,12 @@ async def create_persona(request: CreatePersonaRequest, db: Session = Depends(ge
             personality_traits=traits,
             background_story=request.background_story,
             thinking_style=request.thinking_style,
-            decision_making_approach="collaborative",
+            decision_making_approach=request.decision_making_approach,
             debate_intensity=request.debate_intensity,
             initial_memories=[m.dict() for m in request.initial_memories] if request.initial_memories else None,
             micro_agent_types=request.micro_agent_types,
-            avatar=request.avatar
+            avatar=request.avatar,
+            owner_id=current_user.id,
         )
 
         agent_id = agent.id
@@ -357,9 +363,17 @@ async def get_persona_template():
 
 
 @app.get("/personas/{agent_id}/blueprint", tags=["Personas"])
-async def get_persona_blueprint(agent_id: str, db: Session = Depends(get_db)):
+async def get_persona_blueprint(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Obtém blueprint completo da persona"""
 
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(agent, current_user)
     persona = PersonaEngine(db, agent_id)
     if not persona.has_persona:
         raise HTTPException(status_code=404, detail="Persona não encontrada. Crie primeiro com POST /personas")
@@ -388,7 +402,8 @@ async def get_persona_blueprint(agent_id: str, db: Session = Depends(get_db)):
 async def update_persona_blueprint(
     agent_id: str,
     request: UpdateBlueprintRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Actualiza uma secção específica do blueprint.
@@ -397,6 +412,10 @@ async def update_persona_blueprint(
     behavioral_config, worldview, growth_arc, behavior_prompts, meta
     """
 
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(agent, current_user)
     persona = PersonaEngine(db, agent_id)
     if not persona.has_persona:
         raise HTTPException(status_code=404, detail="Persona não encontrada")
