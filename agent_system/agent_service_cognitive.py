@@ -126,6 +126,7 @@ class AgentServiceCognitive:
         micro_agent_types: Optional[List[str]] = None,
         avatar: str = "👤",
         micro_agents_config: Optional[Dict] = None,
+        owner_id: Optional[str] = None,
     ) -> Agent:
         """
         Cria novo agente (pessoa artificial)
@@ -148,6 +149,7 @@ class AgentServiceCognitive:
         # Criar agente
         agent = Agent(
             id=agent_id,
+            owner_id=owner_id,
             name=name,
             description=description,
             avatar=avatar,
@@ -264,14 +266,18 @@ class AgentServiceCognitive:
         active_only: bool = True,
         limit: int = 100,
         offset: int = 0,
+        owner_id: Optional[str] = None,
     ) -> List[Agent]:
-        """Lista agentes"""
-        
+        """Lista agentes. Se owner_id for passado, filtra apenas os do utilizador."""
+
         query = self.db.query(Agent)
-        
+
         if active_only:
             query = query.filter(Agent.is_active == True)
-        
+
+        if owner_id is not None:
+            query = query.filter(Agent.owner_id == owner_id)
+
         return query.order_by(Agent.created_at.desc()).limit(limit).offset(offset).all()
     
     # ========== ATUALIZAR AGENTE ==========
@@ -552,17 +558,21 @@ class AgentServiceCognitive:
         
         return {
             "id": agent.id,
+            "owner_id": agent.owner_id,
             "name": agent.name,
             "description": agent.description,
             "avatar": agent.avatar,
+            "background_story": agent.background_story,
             "personality_traits": agent.personality_traits,
             "base_values": agent.base_values,
             "thinking_style": agent.thinking_style,
             "decision_making_approach": agent.decision_making_approach,
+            "debate_intensity": agent.debate_intensity,
             "micro_agents_count": len(agent.micro_agents),
             "memories_count": len(agent.memories),
             "documents_count": len(agent.documents),
             "is_active": agent.is_active,
+            "last_interaction": agent.last_interaction.isoformat() if agent.last_interaction else None,
             "created_at": agent.created_at.isoformat() if agent.created_at else None,
             "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
         }

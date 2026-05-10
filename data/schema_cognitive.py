@@ -28,9 +28,10 @@ Base = declarative_base()
 class Agent(Base):
     """Agente humano artificial - pessoa completa com identidade"""
     __tablename__ = "agents"
-    
+
     # Identidade
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    owner_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text)
     avatar = Column(String(10), default="👤")

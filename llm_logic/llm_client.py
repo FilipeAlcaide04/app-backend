@@ -1,3 +1,5 @@
+
+
 """
 Cliente LLM para Ollama
 """

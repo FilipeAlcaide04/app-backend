@@ -45,6 +45,7 @@ class User(Base):
             "email": self.email,
             "role": self.role,
             "is_active": self.is_active,
+            "oauth_provider": self.oauth_provider,
             "avatar": self.avatar,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

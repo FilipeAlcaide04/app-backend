@@ -65,7 +65,8 @@ app.add_middleware(
 )
 
 # Auth Router
-from api.auth import router as auth_router
+from api.auth import router as auth_router, get_current_user, require_admin
+from data.schema_auth import User
 app.include_router(auth_router)
 
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -82,6 +83,27 @@ async def startup_event():
     logger.info("INICIANDO SERVIDOR - HUMAN SIMULATION API v3.0")
     logger.info("=" * 80)
     preload_embedding_model()
+
+    # Migration idempotente: adicionar owner_id à tabela agents se ainda não existir
+    from sqlalchemy import create_engine, text
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='agents' AND column_name='owner_id'
+                    ) THEN
+                        ALTER TABLE agents ADD COLUMN owner_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE;
+                        CREATE INDEX IF NOT EXISTS ix_agents_owner_id ON agents(owner_id);
+                    END IF;
+                END $$;
+            """))
+        logger.info("Migration owner_id verificada/aplicada")
+    except Exception as e:
+        logger.warning(f"Migration owner_id falhou (pode já estar aplicada): {e}")
 
     # Seed admin user
     from api.auth import seed_admin_user
@@ -422,7 +444,8 @@ async def reset_persona_state(agent_id: str, db: Session = Depends(get_db)):
 async def chat_with_persona(
     agent_id: str,
     request: ChatRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Chat natural com persona. Conversas persistem em DB.
@@ -433,6 +456,7 @@ async def chat_with_persona(
     agent = service.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agente {agent_id} não encontrado")
+    _ensure_owner(agent, current_user)
 
     try:
         start_time = time.time()
@@ -510,9 +534,21 @@ async def get_conversation_history(
 # ENDPOINTS - AGENTES (compatibilidade com v1)
 # ============================================================================
 
+def _ensure_owner(agent, user: User):
+    """Garante que o utilizador é dono do agente ou admin."""
+    if user.role == "admin":
+        return
+    if agent.owner_id and agent.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Não tens acesso a este agente")
+
+
 @app.post("/agents", tags=["Agents"])
-async def create_agent(request: CreateAgentRequest, db: Session = Depends(get_db)):
-    """Cria agente (v1 - sem persona completa)"""
+async def create_agent(
+    request: CreateAgentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cria agente associado ao utilizador autenticado."""
 
     service = AgentServiceCognitive(db)
     try:
@@ -528,6 +564,7 @@ async def create_agent(request: CreateAgentRequest, db: Session = Depends(get_db
             initial_memories=request.initial_memories,
             micro_agent_types=request.micro_agent_types,
             avatar=request.avatar,
+            owner_id=current_user.id,
         )
         return service.agent_to_dict(agent)
     except Exception as e:
@@ -536,35 +573,65 @@ async def create_agent(request: CreateAgentRequest, db: Session = Depends(get_db
 
 @app.get("/agents", tags=["Agents"])
 async def list_agents(
-    active_only: bool = True, limit: int = 100, offset: int = 0,
-    db: Session = Depends(get_db)
+    active_only: bool = True,
+    limit: int = 100,
+    offset: int = 0,
+    all_users: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    """Lista agentes do utilizador autenticado. Admins podem usar all_users=true para ver todos."""
     service = AgentServiceCognitive(db)
-    agents = service.list_agents(active_only=active_only, limit=limit, offset=offset)
+    owner_filter = None if (all_users and current_user.role == "admin") else current_user.id
+    agents = service.list_agents(
+        active_only=active_only, limit=limit, offset=offset, owner_id=owner_filter
+    )
     return [service.agent_to_dict(agent) for agent in agents]
 
 
 @app.get("/agents/{agent_id}", tags=["Agents"])
-async def get_agent(agent_id: str, db: Session = Depends(get_db)):
+async def get_agent(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     service = AgentServiceCognitive(db)
     agent = service.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(agent, current_user)
     return service.agent_to_dict(agent)
 
 
 @app.put("/agents/{agent_id}", tags=["Agents"])
-async def update_agent(agent_id: str, updates: Dict[str, Any], db: Session = Depends(get_db)):
+async def update_agent(
+    agent_id: str,
+    updates: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     service = AgentServiceCognitive(db)
-    agent = service.update_agent(agent_id, **updates)
-    if not agent:
+    existing = service.get_agent(agent_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(existing, current_user)
+
+    agent = service.update_agent(agent_id, **updates)
     return service.agent_to_dict(agent)
 
 
 @app.delete("/agents/{agent_id}", tags=["Agents"])
-async def delete_agent(agent_id: str, db: Session = Depends(get_db)):
+async def delete_agent(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     service = AgentServiceCognitive(db)
+    existing = service.get_agent(agent_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(existing, current_user)
+
     if not service.delete_agent(agent_id):
         raise HTTPException(status_code=404, detail="Agente não encontrado")
     return {"message": f"Agente {agent_id} removido"}
@@ -769,6 +836,123 @@ async def get_learning_stats(agent_id: str, db: Session = Depends(get_db)):
         "total_learning_events": events,
         "synaptic_connections": connections,
         "events_by_type": {t: c for t, c in by_type if t}
+    }
+
+
+# ============================================================================
+# ENDPOINTS - DASHBOARD STATS
+# ============================================================================
+
+@app.get("/dashboard/stats", tags=["Dashboard"])
+async def get_dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Estatísticas reais para a dashboard do utilizador."""
+    from data.schema_cognitive import (
+        Memory, Document, MicroAgent,
+        ConversationSession, ConversationMessage,
+        LearningEvent, SynapticConnection,
+    )
+    from sqlalchemy import func
+
+    uid = current_user.id
+
+    user_agents = db.query(Agent).filter(Agent.owner_id == uid, Agent.deleted_at.is_(None)).all()
+    agent_ids = [a.id for a in user_agents]
+
+    total_agents = len(user_agents)
+    active_agents = sum(1 for a in user_agents if a.is_active)
+
+    total_memories = 0
+    total_documents = 0
+    total_micro_agents = 0
+    total_conversations = 0
+    total_messages = 0
+    total_learning = 0
+    total_synapses = 0
+
+    if agent_ids:
+        total_memories = db.query(func.count(Memory.id)).filter(Memory.agent_id.in_(agent_ids)).scalar() or 0
+        total_documents = db.query(func.count(Document.id)).filter(Document.agent_id.in_(agent_ids)).scalar() or 0
+        total_micro_agents = db.query(func.count(MicroAgent.id)).filter(MicroAgent.agent_id.in_(agent_ids)).scalar() or 0
+        total_conversations = db.query(func.count(ConversationSession.id)).filter(ConversationSession.agent_id.in_(agent_ids)).scalar() or 0
+        total_messages = (
+            db.query(func.count(ConversationMessage.id))
+            .join(ConversationSession, ConversationMessage.session_id == ConversationSession.id)
+            .filter(ConversationSession.agent_id.in_(agent_ids))
+            .scalar() or 0
+        )
+        total_learning = db.query(func.count(LearningEvent.id)).filter(LearningEvent.agent_id.in_(agent_ids)).scalar() or 0
+        total_synapses = db.query(func.count(SynapticConnection.id)).filter(SynapticConnection.agent_id.in_(agent_ids)).scalar() or 0
+
+    agents_summary = []
+    for a in user_agents:
+        mem_count = db.query(func.count(Memory.id)).filter(Memory.agent_id == a.id).scalar() or 0
+        doc_count = db.query(func.count(Document.id)).filter(Document.agent_id == a.id).scalar() or 0
+        conv_count = db.query(func.count(ConversationSession.id)).filter(ConversationSession.agent_id == a.id).scalar() or 0
+        msg_count = (
+            db.query(func.count(ConversationMessage.id))
+            .join(ConversationSession, ConversationMessage.session_id == ConversationSession.id)
+            .filter(ConversationSession.agent_id == a.id)
+            .scalar() or 0
+        )
+        agents_summary.append({
+            "id": a.id,
+            "name": a.name,
+            "avatar": a.avatar,
+            "is_active": a.is_active,
+            "thinking_style": a.thinking_style,
+            "memories": mem_count,
+            "documents": doc_count,
+            "conversations": conv_count,
+            "messages": msg_count,
+            "last_interaction": a.last_interaction.isoformat() if a.last_interaction else None,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        })
+
+    recent_conversations = []
+    if agent_ids:
+        recent_sessions = (
+            db.query(ConversationSession)
+            .filter(ConversationSession.agent_id.in_(agent_ids))
+            .order_by(ConversationSession.started_at.desc())
+            .limit(10)
+            .all()
+        )
+        for s in recent_sessions:
+            agent_name = next((a.name for a in user_agents if a.id == s.agent_id), "?")
+            agent_avatar = next((a.avatar for a in user_agents if a.id == s.agent_id), "🤖")
+            recent_conversations.append({
+                "id": s.id,
+                "agent_id": s.agent_id,
+                "agent_name": agent_name,
+                "agent_avatar": agent_avatar,
+                "message_count": s.message_count or 0,
+                "current_topic": s.current_topic,
+                "emotional_tone": s.emotional_tone,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "is_active": s.is_active,
+            })
+
+    return {
+        "totals": {
+            "agents": total_agents,
+            "active_agents": active_agents,
+            "memories": total_memories,
+            "documents": total_documents,
+            "micro_agents": total_micro_agents,
+            "conversations": total_conversations,
+            "messages": total_messages,
+            "learning_events": total_learning,
+            "synaptic_connections": total_synapses,
+        },
+        "agents": agents_summary,
+        "recent_conversations": recent_conversations,
+        "user": {
+            "name": current_user.name,
+            "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        },
     }
 
 
