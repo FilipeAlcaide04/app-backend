@@ -258,7 +258,8 @@ class EmotionalEngine:
                     "keywords": keywords
                 })
 
-        logger.info(f"Carregados {len(self.traumatic_triggers)} triggers para {self.agent_id}")
+        if self.traumatic_triggers:
+            logger.debug(f"[emotion] {len(self.traumatic_triggers)} triggers carregados para {self.agent_id}")
 
     def _extract_keywords(self, text: str) -> List[str]:
         """Extrai keywords significativas (inclui palavras de 3+ chars para nomes curtos como 'pai', 'mãe')"""

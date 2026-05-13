@@ -79,7 +79,7 @@ class ConversationManager:
         self.db.add(session)
         self.db.commit()
 
-        logger.info(f"Nova sessão de conversa: {session_id} (agente: {self.agent_id}, user: {user_id})")
+        logger.debug(f"[session] nova: {session_id} agente={self.agent_id}")
         return session
 
     def add_message(

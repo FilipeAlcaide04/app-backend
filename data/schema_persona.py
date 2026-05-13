@@ -462,50 +462,6 @@ class RelationshipDynamic(Base):
 
 
 # ============================================================================
-# GROWTH JOURNAL - Registo de crescimento pessoal
-# ============================================================================
-
-class GrowthEvent(Base):
-    """
-    Regista eventos de crescimento pessoal, regressão, breakthroughs.
-    Permite tracking da evolução da persona ao longo do tempo.
-    """
-    __tablename__ = "growth_events"
-
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"),
-                      nullable=False, index=True)
-
-    event_type = Column(String(30), nullable=False)
-    # growth | regression | breakthrough | crisis | insight | setback |
-    # boundary_set | pattern_broken | pattern_repeated | forgiveness
-
-    description = Column(Text, nullable=False)
-    trigger = Column(Text)  # O que provocou
-
-    # O que mudou
-    area_affected = Column(String(50))
-    # identity | emotions | relationships | cognition | behavior | worldview | values
-    old_pattern = Column(Text)
-    new_pattern = Column(Text)
-
-    # Profundidade da mudança
-    depth = Column(Float, default=0.5)  # 0=superficial, 1=profunda
-    lasting = Column(Boolean, default=False)  # Mudança duradoura?
-    backslide_risk = Column(Float, default=0.5)  # Risco de voltar atrás
-
-    # Ligação a persona config (o que deve ser actualizado no blueprint)
-    blueprint_updates = Column(JSON, default=dict)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    __table_args__ = (
-        Index('idx_growth_agent', 'agent_id'),
-        Index('idx_growth_type', 'event_type'),
-    )
-
-
-# ============================================================================
 # BEHAVIORAL LOG - Log de comportamentos para análise de padrões
 # ============================================================================
 

@@ -12,10 +12,10 @@ Responsável por:
 """
 
 from sqlalchemy.orm import Session
-from data.schema_cognitive import Agent, Memory, MemoryType, EmotionalState, PersonalityProfile
+from data.schema_cognitive import Agent, Memory, MemoryType, PersonalityProfile
 from data.schema_persona import (
     PersonaBlueprint, DynamicState, PersonaMemoryDetail,
-    InnerMonologue, RelationshipDynamic, GrowthEvent, BehavioralLog
+    InnerMonologue, RelationshipDynamic, BehavioralLog
 )
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -475,7 +475,7 @@ class PersonaEngine:
         self.blueprint = blueprint
         self.state = initial_state
 
-        logger.info(f"Persona criada para agente {self.agent_id}")
+        logger.info(f"[persona] criada para {self.agent_id}")
         return blueprint
 
     def _create_initial_state(self, persona_data: Dict) -> DynamicState:
@@ -582,7 +582,7 @@ class PersonaEngine:
                 )
                 self.db.add(detail)
 
-        logger.info(f"Criadas {len(memories_config)} memórias iniciais para {self.agent_id}")
+        logger.debug(f"[persona] {len(memories_config)} memórias iniciais para {self.agent_id}")
 
     def _sync_personality_profile(self, persona_data: Dict):
         """Sincroniza com PersonalityProfile existente para compatibilidade"""
@@ -1226,32 +1226,6 @@ class PersonaEngine:
         rel.emotional_history = history[-50:]
 
         self.db.commit()
-
-    # ================================================================
-    # GROWTH TRACKING
-    # ================================================================
-
-    def record_growth_event(
-        self,
-        event_type: str,
-        description: str,
-        area: str = "",
-        trigger: str = "",
-        depth: float = 0.5
-    ) -> GrowthEvent:
-        """Regista evento de crescimento/regressão"""
-
-        event = GrowthEvent(
-            agent_id=self.agent_id,
-            event_type=event_type,
-            description=description,
-            trigger=trigger,
-            area_affected=area,
-            depth=depth
-        )
-        self.db.add(event)
-        self.db.commit()
-        return event
 
     # ================================================================
     # RESET

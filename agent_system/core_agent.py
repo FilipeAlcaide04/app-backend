@@ -62,13 +62,25 @@ class CoreAgent:
 
         context = context or {}
 
+        logger.info(f"[FASE 6] SÍNTESE: Combinando perspectivas de {len(micro_agent_responses)} micro-agentes")
+        for agent_name, response_data in micro_agent_responses.items():
+            logger.info(f"  • {agent_name}: perspectiva='{response_data.get('perspective', 'N/A')[:80]}...', confiança={response_data.get('confidence', 0):.2f}")
+            if response_data.get('supporting_arguments'):
+                logger.debug(f"    Argumentos a favor: {response_data.get('supporting_arguments', [])[:2]}")
+            if response_data.get('opposing_arguments'):
+                logger.debug(f"    Argumentos contra: {response_data.get('opposing_arguments', [])[:2]}")
+
         # 1. Analisar perspectivas
         consensus = self._analyze_consensus(micro_agent_responses)
         weighted = self._weight_perspectives(micro_agent_responses, query, consensus)
         resolved = self._resolve_conflicts(weighted, consensus)
 
+        logger.info(f"[SÍNTESE] Consenso: {consensus.get('consensus_score', 0):.2f}, Conflitos resolvidos")
+
         # 2. Gerar pensamento interno autónomo
         inner_thought = self._generate_inner_thought(query, context, resolved)
+        if inner_thought:
+            logger.info(f"[SÍNTESE] Pensamento interno: '{inner_thought[:120]}...'")
 
         # 3. Gerar resposta final com toda a persona
         final_text = self._generate_persona_response(
@@ -76,12 +88,14 @@ class CoreAgent:
             query, context, user_id,
             inner_thought=inner_thought
         )
+        logger.info(f"[SÍNTESE] ✓ Resposta final gerada ({len(final_text)} chars)")
 
         # 4. Auto-gerar memórias se a conversa for significativa
         self._auto_generate_memories(query, final_text, context, user_id)
 
         # 5. Calcular confiança
         confidence = self._calculate_final_confidence(weighted)
+        logger.info(f"[SÍNTESE] Confiança final: {confidence:.2f}")
 
         # 6. Actualizar estado da persona
         if self.persona.has_persona:
@@ -92,6 +106,7 @@ class CoreAgent:
                 emotional_changes=emotional_changes,
                 user_id=user_id
             )
+            logger.debug(f"[SÍNTESE] Estado da persona actualizado")
 
         # 7. Actualizar relação
         if user_id:

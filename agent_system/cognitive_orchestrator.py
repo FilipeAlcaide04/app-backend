@@ -107,7 +107,7 @@ class CognitiveOrchestrator:
         Processo de pensamento cognitivo COMPLETO com persona.
         """
 
-        logger.info(f"Agente {self.agent_id} iniciando pensamento")
+        logger.info(f"[think] agente={self.agent_id} query=\"{query[:60]}...\"")
         context = context or {}
         start_time = datetime.utcnow()
 
@@ -137,19 +137,32 @@ class CognitiveOrchestrator:
             k: v for k, v in relevance_scores.items() if v.get("should_execute")
         }
 
+        logger.info(f"[FASE 1] RELEVÂNCIA: Avaliando {len(self.micro_agents)} micro-agentes")
+        for agent_name, score_info in relevance_scores.items():
+            logger.debug(f"  • {agent_name}: score={score_info.get('score', 0):.2f}, relevante={score_info.get('should_execute', False)}, razão={score_info.get('reason', 'N/A')}")
+
         if not relevant_agents:
             relevant_agents = self.micro_agents
+            logger.debug(f"[FASE 1] Nenhum agente específico relevante. Usando todos: {list(self.micro_agents.keys())}")
         else:
             self.micro_agents = {
                 k: v for k, v in self.micro_agents.items() if k in relevant_agents
             }
+            logger.info(f"[FASE 1] ✓ Selecionados {len(self.micro_agents)} agentes para pensar: {list(self.micro_agents.keys())}")
 
         # === FASE 2: DOCUMENTOS ===
         doc_context = {}
         if self.document_awareness.should_consult_documents(query):
+            logger.info(f"[FASE 2] DOCUMENTOS: Consultando base de documentos...")
             doc_context = self.document_awareness.get_document_context_for_agent(query)
             if doc_context.get("has_documents"):
                 context["documents"] = doc_context
+                logger.info(f"[FASE 2] ✓ Documentos encontrados: {doc_context.get('document_count', 0)} docs, relevância={doc_context.get('relevance_score', 0):.2f}")
+                logger.debug(f"[FASE 2]   Contexto: {doc_context.get('context_text', '')[:200]}...")
+            else:
+                logger.debug(f"[FASE 2] Nenhum documento relevante encontrado")
+        else:
+            logger.debug(f"[FASE 2] DOCUMENTOS: Não necessário consultar documentos para esta pergunta")
 
         # === FASE 3: MEMÓRIAS ===
         memories = self.memory_manager.recall_relevant_memories(query, limit=5)
@@ -162,6 +175,15 @@ class CognitiveOrchestrator:
             }
             for mem in memories
         ]
+
+        logger.info(f"[FASE 3] MEMÓRIAS: Recuperadas {len(memories)} memórias relevantes")
+        for i, mem in enumerate(memories, 1):
+            logger.info(f"  {i}. [{mem.type.name if mem.type else '?'}] {mem.title}")
+            logger.debug(f"     - Importância: {mem.importance_score:.2f}, Valência Emocional: {mem.emotional_valence}")
+            logger.debug(f"     - Conteúdo: {mem.content[:100]}...")
+        
+        if not memories:
+            logger.debug(f"[FASE 3] Nenhuma memória relevante encontrada para: '{query[:50]}...'")
 
         # Identidade e estado
         context["agent_identity"] = self.get_agent_identity()
@@ -184,12 +206,17 @@ class CognitiveOrchestrator:
         context["emotional_modifiers"] = self.emotions.get_emotional_modifiers()
         context["emotional_reaction"] = emotional_reaction
 
-        if emotional_reaction.get("intensity", 0) > 0.3:
-            logger.info(f"Reacção emocional: {emotional_reaction.get('emotional_reaction')} "
-                       f"(intensidade: {emotional_reaction.get('intensity', 0):.0%})")
+        logger.info(f"[FASE 4] EMOCIONAL: Emoção detectada = {emotional_reaction.get('emotional_reaction', 'neutro')}")
+        logger.info(f"  - Intensidade: {emotional_reaction.get('intensity', 0):.0%}")
+        logger.info(f"  - Humor atual: {emotional_reaction.get('current_mood', 'N/A')}")
+        logger.info(f"  - Modificador de resposta: {emotional_reaction.get('response_modifier', 'nenhum')}")
+        logger.debug(f"[FASE 4] Contexto emocional: {json.dumps(emotional_context, ensure_ascii=False)[:150]}...")
 
         # === FASE 5: REDE NEURAL ===
         neural_modifiers = self.neural_network.get_micro_agent_modifiers(query, context)
+        logger.info(f"[FASE 5] REDE NEURAL: Modificadores calculados")
+        for agent_name, modifiers in neural_modifiers.items():
+            logger.debug(f"  • {agent_name}: {json.dumps(modifiers, ensure_ascii=False)}")
 
         # Registar processo
         if record_process:
@@ -255,7 +282,6 @@ class CognitiveOrchestrator:
             self.db.commit()
 
         # === FASE 10: APRENDIZAGEM ===
-        interaction_id = None
         try:
             interaction_id = self.learning.record_interaction(
                 query=query,
@@ -271,8 +297,9 @@ class CognitiveOrchestrator:
                 confidence=final_response.get("confidence", 0.5),
                 user_context={"user_id": user_id}
             )
+            logger.info(f"[FASE 10] APRENDIZAGEM: Interação registada (ID: {interaction_id})")
         except Exception as e:
-            logger.warning(f"Erro ao registrar aprendizado: {e}")
+            logger.warning(f"[FASE 10] Erro ao registar aprendizagem: {e}")
 
         duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
@@ -283,6 +310,14 @@ class CognitiveOrchestrator:
         final_response["emotional_reaction"] = emotional_reaction.get("emotional_reaction")
         final_response["conversation_id"] = session.id
         final_response["persona_state"] = self.persona.get_state_summary() if self.persona.has_persona else None
+
+        # === RESUMO FINAL ===
+        logger.info(f"✅ PROCESSO COMPLETO")
+        logger.info(f"   ⏱️  Tempo total: {duration_ms}ms")
+        logger.info(f"   📊 Memórias usadas: {len(memories)} de {len(context.get('memory', []))}")
+        logger.info(f"   🧠 Micro-agentes: {len(thinking_results)} pensando em paralelo")
+        logger.info(f"   💬 Resposta: {agent_response_text[:100]}...")
+        logger.info(f"   🎯 Confiança: {final_response.get('confidence', 0):.0%}")
 
         return final_response
 
@@ -304,9 +339,12 @@ class CognitiveOrchestrator:
         self, query: str, context: Dict, neural_modifiers: Dict
     ) -> Dict[str, Dict]:
 
+        logger.info(f"[FASE 6.1] PENSAMENTO PARALELO: Iniciando {len(self.micro_agents)} micro-agentes em paralelo")
+        
         tasks = {}
         for agent_type, micro_agent in self.micro_agents.items():
             modifier = neural_modifiers.get(agent_type, {})
+            logger.debug(f"  ⚙️  {agent_type}: inicializado (peso_base={micro_agent.get_weight():.2f}, modificador={modifier.get('weight_modifier', 1.0):.2f}x)")
             tasks[agent_type] = asyncio.create_task(
                 self._think_async_enhanced(micro_agent, query, context, modifier)
             )
@@ -316,8 +354,10 @@ class CognitiveOrchestrator:
             try:
                 result = await task
                 results[agent_type] = result
+                logger.info(f"[FASE 6.1] ✓ {agent_type} pensamento completo: confiança={result.get('confidence', 0):.2f}, peso={result.get('weight', 1.0):.2f}")
+                logger.debug(f"  Perspectiva: '{result.get('perspective', 'N/A')[:100]}...'")
             except Exception as e:
-                logger.error(f"Erro em {agent_type}: {e}")
+                logger.error(f"[FASE 6.1] ✗ Erro em {agent_type}: {e}")
                 results[agent_type] = self._error_result(e)
 
         return results
@@ -332,6 +372,7 @@ class CognitiveOrchestrator:
                 f"Influenciado por {neural_modifier['memory_count']} memória(s). "
                 f"Peso: {neural_modifier.get('weight_modifier', 1.0):.1f}x"
             )
+            logger.debug(f"[PENSAMENTO] {micro_agent.thinking_type.value}: ativadas {neural_modifier['memory_count']} memórias")
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, micro_agent.think, query, enhanced_context)

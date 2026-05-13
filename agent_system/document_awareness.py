@@ -147,7 +147,7 @@ class DocumentAwareness:
         relevant_docs = sorted(relevant_docs, key=lambda x: x["similarity_score"], reverse=True)[:limit]
         
         if relevant_docs:
-            logger.info(f"Encontrados {len(relevant_docs)} documentos relevantes para agente {self.agent_id}")
+            logger.debug(f"[docs] {len(relevant_docs)} relevantes para {self.agent_id}")
         
         return relevant_docs
     
@@ -317,7 +317,7 @@ Este documento foi disponibilizado para consulta.
                 relates_to_events=[]
             )
             
-            logger.info(f"Memória criada para documento {document.filename}")
+            logger.debug(f"[docs] memória criada: {document.filename}")
         
         except Exception as e:
             logger.warning(f"Erro ao criar memória de documento: {e}")

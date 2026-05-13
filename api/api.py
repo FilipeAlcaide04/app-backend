@@ -1,53 +1,38 @@
 """
-API REST v2 - Sistema de Humanos Virtuais Completos
+API REST - Sistema de Humanos Virtuais
 Endpoints para criar, gerir e interagir com personas humanas
 
-Novidades v2:
-- Criação de personas com blueprint completo (digital_human_persona_v3)
-- Chat persistente em DB (não em memória)
-- Estado emocional persistente entre conversas
-- Gestão de blueprint por secção
-- Reset de estado emocional
-- Histórico de conversas real
-"""
-
-
-"""
 Como correr: python -m uvicorn api.api:app --reload
 """
 
-
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import time
 from sqlalchemy.orm import Session
-from datetime import datetime
 
 # Database
 from data.database_cognitive import init_cognitive_db, get_db_session
 from data.schema_cognitive import Agent
-from data.schema_persona import PersonaBlueprint, DynamicState
 import data.schema_auth  # noqa: F401 - registar modelo User na Base
 
 # Services
 from agent_system.agent_service_cognitive import AgentServiceCognitive
-from agent_system.memory_manager_cognitive import MemoryManager, MemoryTypeEnum
 from agent_system.cognitive_orchestrator import CognitiveOrchestrator
-from agent_system.persona_engine import PersonaEngine, get_default_persona_template
-from agent_system.conversation_manager import ConversationManager
+from agent_system.persona_engine import PersonaEngine
 from document_handlers.document_service_cognitive import DocumentServiceCognitive
 from config.embedding_cache import preload_embedding_model
 
-import asyncio
 import logging
 import os
-import time
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from config.logging_config import setup_logging
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -65,13 +50,9 @@ app.add_middleware(
 )
 
 # Auth Router
-from api.auth import router as auth_router, get_current_user, require_admin
+from api.auth import router as auth_router, get_current_user
 from data.schema_auth import User
 app.include_router(auth_router)
-
-static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
-if os.path.exists(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:admin@localhost:5432/cognitive_agents")
 init_cognitive_db(DATABASE_URL)
@@ -79,12 +60,9 @@ init_cognitive_db(DATABASE_URL)
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("\n" + "=" * 80)
-    logger.info("INICIANDO SERVIDOR - HUMAN SIMULATION API v3.0")
-    logger.info("=" * 80)
+    logger.info("Servidor a iniciar — Human Simulation API v3.0")
     preload_embedding_model()
 
-    # Migration idempotente: adicionar owner_id à tabela agents se ainda não existir
     from sqlalchemy import create_engine, text
     engine = create_engine(DATABASE_URL)
     try:
@@ -101,11 +79,9 @@ async def startup_event():
                     END IF;
                 END $$;
             """))
-        logger.info("Migration owner_id verificada/aplicada")
     except Exception as e:
-        logger.warning(f"Migration owner_id falhou (pode já estar aplicada): {e}")
+        logger.warning(f"Migration owner_id: {e}")
 
-    # Seed admin user
     from api.auth import seed_admin_user
     db = get_db_session(DATABASE_URL)
     try:
@@ -113,7 +89,7 @@ async def startup_event():
     finally:
         db.close()
 
-    logger.info("=" * 80 + "\n")
+    logger.info("Servidor pronto")
 
 
 # ============================================================================
@@ -131,40 +107,17 @@ class InitialMemory(BaseModel):
     relates_to_topics: Optional[List[str]] = None
 
 
-class CreateAgentRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
-    personality_traits: Optional[Dict] = None
-    base_values: Optional[Dict] = None
-    background_story: Optional[str] = None
-    thinking_style: Optional[str] = "balanced"
-    decision_making_approach: Optional[str] = "collaborative"
-    debate_intensity: Optional[float] = 0.7
-    initial_memories: Optional[List[InitialMemory]] = None
-    micro_agent_types: Optional[List[str]] = None
-    avatar: Optional[str] = "👤"
-
-
 class CreatePersonaRequest(BaseModel):
-    """Request para criar humano virtual com persona COMPLETA"""
     name: str
     description: Optional[str] = None
     avatar: Optional[str] = "👤"
     background_story: Optional[str] = None
-
-    # Persona blueprint completo (ou parcial - faz merge com defaults)
     persona: Optional[Dict[str, Any]] = None
-
-    # Configurações simplificadas (alternativa ao blueprint completo)
-    personality_traits: Optional[Dict] = None  # Big Five simples
+    personality_traits: Optional[Dict] = None
     thinking_style: Optional[str] = "balanced"
     decision_making_approach: Optional[str] = "collaborative"
     debate_intensity: Optional[float] = 0.7
-
-    # Micro-agentes
     micro_agent_types: Optional[List[str]] = None
-
-    # Memórias iniciais
     initial_memories: Optional[List[InitialMemory]] = None
 
 
@@ -175,45 +128,9 @@ class ChatRequest(BaseModel):
     context: Optional[Dict] = None
 
 
-class ThinkRequest(BaseModel):
-    message: str
-    user_id: Optional[str] = None
-    conversation_id: Optional[str] = None
-    context: Optional[Dict] = None
-    query: Optional[str] = None
-
-
-class MemoryRequest(BaseModel):
-    title: str
-    content: str
-    memory_type: str = "semantic"
-    importance_score: Optional[float] = 0.5
-    emotional_valence: Optional[float] = 0.0
-    is_autobiographical: Optional[bool] = True
-    relates_to_topics: Optional[List[str]] = None
-
-
-class SearchMemoriesRequest(BaseModel):
-    query: str
-    memory_types: Optional[List[str]] = None
-    top_k: Optional[int] = 5
-
-
-class FeedbackRequest(BaseModel):
-    interaction_id: str
-    feedback_type: str
-    feedback_score: Optional[float] = 0.0
-    feedback_text: Optional[str] = None
-
-
 class UpdateBlueprintRequest(BaseModel):
     section: str
     data: Dict[str, Any]
-
-
-class DocumentSearchRequest(BaseModel):
-    query: str
-    top_k: Optional[int] = 5
 
 
 # ============================================================================
@@ -228,41 +145,17 @@ def get_db():
         db.close()
 
 
+def _ensure_owner(agent, user: User):
+    """Garante que o utilizador é dono do agente ou admin."""
+    if user.role == "admin":
+        return
+    if agent.owner_id and agent.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Não tens acesso a este agente")
+
+
 # ============================================================================
-# ENDPOINTS - PERSONAS (CRIAR HUMANOS)
+# ENDPOINTS - PERSONAS
 # ============================================================================
-
-@app.get("/personas", tags=["Personas"])
-async def list_personas(db: Session = Depends(get_db)):
-    """Lista todas as personas criadas com resumo do estado actual."""
-
-    blueprints = db.query(PersonaBlueprint).all()
-
-    result = []
-    for bp in blueprints:
-        agent = db.query(Agent).filter(Agent.id == bp.agent_id).first()
-        state = db.query(DynamicState).filter(
-            DynamicState.agent_id == bp.agent_id,
-            DynamicState.is_current == True
-        ).first()
-
-        identity = bp.identity or {}
-        personality = bp.personality_full or {}
-
-        result.append({
-            "id": bp.agent_id,
-            "name": agent.name if agent else "?",
-            "self_concept": identity.get("self_concept", {}).get("how_they_see_themselves", ""),
-            "attachment_style": personality.get("attachment_style", ""),
-            "mood": state.current_mood if state else None,
-            "energy": state.energy_level if state else None,
-            "stress": state.current_stress_load if state else None,
-            "primary_emotion": state.primary_emotion if state else None,
-            "created_at": bp.created_at.isoformat() if bp.created_at else None,
-        })
-
-    return {"total": len(result), "personas": result}
-
 
 @app.post("/personas", tags=["Personas"])
 async def create_persona(
@@ -270,19 +163,9 @@ async def create_persona(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Cria um humano virtual COMPLETO com persona detalhada.
-
-    Pode enviar:
-    - `persona`: Blueprint completo (JSON do schema digital_human_persona_v3)
-    - `personality_traits`: Big Five simples (merge automático com defaults)
-    - Ambos: persona tem prioridade, personality_traits preenche lacunas
-    """
-
     service = AgentServiceCognitive(db)
 
     try:
-        # Preparar personality traits
         traits = request.personality_traits or {}
         if request.persona:
             big_five = request.persona.get("personality_full", {}).get("big_five", {})
@@ -293,7 +176,6 @@ async def create_persona(
             traits = {"openness": 0.6, "conscientiousness": 0.6, "extraversion": 0.5,
                       "agreeableness": 0.7, "neuroticism": 0.3}
 
-        # Criar agente base
         agent = service.create_agent(
             name=request.name,
             description=request.description or f"{request.name} é um humano virtual.",
@@ -309,23 +191,17 @@ async def create_persona(
         )
 
         agent_id = agent.id
-
-        # Criar persona blueprint
         persona_engine = PersonaEngine(db, agent_id)
-
         persona_data = request.persona or {}
 
-        # Se enviou personality_traits simples, injectar no persona_data
         if request.personality_traits and "personality_full" not in persona_data:
             persona_data["personality_full"] = {"big_five": request.personality_traits}
 
-        # Se enviou background_story, injectar na identity
         if request.background_story and "identity" not in persona_data:
             persona_data["identity"] = {}
 
-        blueprint = persona_engine.create_persona(persona_data)
+        persona_engine.create_persona(persona_data)
 
-        # Obter identity builder para preview
         from agent_system.identity_builder import IdentityBuilder
         identity = IdentityBuilder(db, agent_id)
 
@@ -350,33 +226,19 @@ async def create_persona(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/personas/template", tags=["Personas"])
-async def get_persona_template():
-    """
-    Retorna o template completo de persona com todos os campos e defaults.
-    Use como base para criar personas customizadas.
-    """
-    return {
-        "template": get_default_persona_template(),
-        "description": "Template completo digital_human_persona_v3. Preencha os campos que quiser, os restantes usam valores padrão."
-    }
-
-
 @app.get("/personas/{agent_id}/blueprint", tags=["Personas"])
 async def get_persona_blueprint(
     agent_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Obtém blueprint completo da persona"""
-
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
     _ensure_owner(agent, current_user)
     persona = PersonaEngine(db, agent_id)
     if not persona.has_persona:
-        raise HTTPException(status_code=404, detail="Persona não encontrada. Crie primeiro com POST /personas")
+        raise HTTPException(status_code=404, detail="Persona não encontrada")
 
     bp = persona.blueprint
     return {
@@ -405,13 +267,6 @@ async def update_persona_blueprint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Actualiza uma secção específica do blueprint.
-    Secções válidas: identity, internal_states_config, personality_full,
-    memory_config, emotional_config, cognitive_config, social_config,
-    behavioral_config, worldview, growth_arc, behavior_prompts, meta
-    """
-
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
@@ -427,36 +282,8 @@ async def update_persona_blueprint(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/personas/{agent_id}/state", tags=["Personas"])
-async def get_persona_state(agent_id: str, db: Session = Depends(get_db)):
-    """Obtém estado dinâmico actual da persona (emoções, energia, needs, etc.)"""
-
-    persona = PersonaEngine(db, agent_id)
-
-    return {
-        "agent_id": agent_id,
-        "state": persona.get_state_summary(),
-        "unmet_needs": persona.get_unmet_needs(),
-        "in_crisis": persona.is_in_crisis(),
-    }
-
-
-@app.post("/personas/{agent_id}/reset-state", tags=["Personas"])
-async def reset_persona_state(agent_id: str, db: Session = Depends(get_db)):
-    """Reset do estado emocional da persona para valores iniciais"""
-
-    persona = PersonaEngine(db, agent_id)
-    persona.reset_emotional_state()
-
-    return {
-        "status": "success",
-        "message": "Estado emocional resetado",
-        "new_state": persona.get_state_summary()
-    }
-
-
 # ============================================================================
-# ENDPOINTS - CHAT (CONVERSA NATURAL PERSISTENTE)
+# ENDPOINTS - CHAT
 # ============================================================================
 
 @app.post("/personas/{agent_id}/chat", tags=["Chat"])
@@ -466,11 +293,6 @@ async def chat_with_persona(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Chat natural com persona. Conversas persistem em DB.
-    O estado emocional persiste entre sessões.
-    """
-
     service = AgentServiceCognitive(db)
     agent = service.get_agent(agent_id)
     if not agent:
@@ -479,7 +301,6 @@ async def chat_with_persona(
 
     try:
         start_time = time.time()
-
         orchestrator = CognitiveOrchestrator(db, agent_id)
 
         result = await orchestrator.think(
@@ -509,86 +330,9 @@ async def chat_with_persona(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Manter endpoint antigo para compatibilidade
-@app.post("/agents/{agent_id}/chat", tags=["Chat"])
-async def chat_with_agent(agent_id: str, request: ChatRequest, db: Session = Depends(get_db)):
-    """Chat com agente (redireciona para /personas/{id}/chat)"""
-    return await chat_with_persona(agent_id, request, db)
-
-
-@app.get("/personas/{agent_id}/conversations", tags=["Chat"])
-async def list_persona_conversations(
-    agent_id: str,
-    user_id: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Lista conversas de uma persona"""
-
-    conv_manager = ConversationManager(db, agent_id)
-    sessions = conv_manager.get_all_sessions(user_id=user_id)
-
-    return {"conversations": sessions, "total": len(sessions)}
-
-
-@app.get("/personas/{agent_id}/conversations/{conversation_id}/history", tags=["Chat"])
-async def get_conversation_history(
-    agent_id: str,
-    conversation_id: str,
-    limit: int = 50,
-    db: Session = Depends(get_db)
-):
-    """Obtém histórico de mensagens de uma conversa"""
-
-    conv_manager = ConversationManager(db, agent_id)
-    messages = conv_manager.get_conversation_history(conversation_id, limit=limit)
-
-    return {
-        "conversation_id": conversation_id,
-        "messages": messages,
-        "total": len(messages)
-    }
-
-
 # ============================================================================
-# ENDPOINTS - AGENTES (compatibilidade com v1)
+# ENDPOINTS - AGENTES
 # ============================================================================
-
-def _ensure_owner(agent, user: User):
-    """Garante que o utilizador é dono do agente ou admin."""
-    if user.role == "admin":
-        return
-    if agent.owner_id and agent.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="Não tens acesso a este agente")
-
-
-@app.post("/agents", tags=["Agents"])
-async def create_agent(
-    request: CreateAgentRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Cria agente associado ao utilizador autenticado."""
-
-    service = AgentServiceCognitive(db)
-    try:
-        agent = service.create_agent(
-            name=request.name,
-            description=request.description,
-            personality_traits=request.personality_traits,
-            base_values=request.base_values,
-            background_story=request.background_story,
-            thinking_style=request.thinking_style,
-            decision_making_approach=request.decision_making_approach,
-            debate_intensity=request.debate_intensity,
-            initial_memories=request.initial_memories,
-            micro_agent_types=request.micro_agent_types,
-            avatar=request.avatar,
-            owner_id=current_user.id,
-        )
-        return service.agent_to_dict(agent)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
 
 @app.get("/agents", tags=["Agents"])
 async def list_agents(
@@ -599,7 +343,6 @@ async def list_agents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Lista agentes do utilizador autenticado. Admins podem usar all_users=true para ver todos."""
     service = AgentServiceCognitive(db)
     owner_filter = None if (all_users and current_user.role == "admin") else current_user.id
     agents = service.list_agents(
@@ -657,77 +400,6 @@ async def delete_agent(
 
 
 # ============================================================================
-# ENDPOINTS - PENSAMENTO COGNITIVO
-# ============================================================================
-
-@app.post("/agents/{agent_id}/think", tags=["Cognition"])
-async def agent_think(agent_id: str, request: ThinkRequest, db: Session = Depends(get_db)):
-    service = AgentServiceCognitive(db)
-    try:
-        query = request.message or request.query
-        if not query:
-            raise ValueError("'message' ou 'query' é obrigatório")
-
-        result = await service.think(
-            agent_id=agent_id, query=query,
-            user_id=request.user_id,
-            conversation_id=request.conversation_id,
-            context=request.context
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================================
-# ENDPOINTS - EMOÇÕES E IDENTIDADE
-# ============================================================================
-
-@app.get("/agents/{agent_id}/emotional-state", tags=["Emotions"])
-async def get_emotional_state(agent_id: str, db: Session = Depends(get_db)):
-    from agent_system.emotional_engine import EmotionalEngine
-    engine = EmotionalEngine(db, agent_id)
-    return {
-        "agent_id": agent_id,
-        "emotional_state": engine.get_emotional_summary()
-    }
-
-
-@app.get("/agents/{agent_id}/identity", tags=["Identity"])
-async def get_agent_identity(agent_id: str, db: Session = Depends(get_db)):
-    from agent_system.identity_builder import IdentityBuilder
-    identity = IdentityBuilder(db, agent_id)
-    return {
-        "agent_id": agent_id,
-        "identity_prompt": identity.get_identity_prompt(),
-        "voice_guidelines": identity.get_voice_guidelines(),
-    }
-
-
-# ============================================================================
-# ENDPOINTS - FEEDBACK E APRENDIZAGEM
-# ============================================================================
-
-@app.post("/agents/{agent_id}/feedback", tags=["Learning"])
-async def submit_feedback(agent_id: str, request: FeedbackRequest, db: Session = Depends(get_db)):
-    service = AgentServiceCognitive(db)
-    agent = service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agente não encontrado")
-
-    orchestrator = CognitiveOrchestrator(db, agent_id)
-    result = orchestrator.process_feedback(
-        interaction_id=request.interaction_id,
-        feedback_type=request.feedback_type,
-        feedback_score=request.feedback_score or 0.0,
-        feedback_text=request.feedback_text
-    )
-    return {"status": "success", "learning_applied": True, **result}
-
-
-# ============================================================================
 # ENDPOINTS - MEMÓRIAS
 # ============================================================================
 
@@ -736,43 +408,6 @@ async def list_memories(agent_id: str, db: Session = Depends(get_db)):
     service = AgentServiceCognitive(db)
     memories = service.get_agent_memories(agent_id)
     return {"memories": memories}
-
-
-@app.post("/agents/{agent_id}/memories", tags=["Memory"])
-async def create_memory(agent_id: str, request: MemoryRequest, db: Session = Depends(get_db)):
-    try:
-        mm = MemoryManager(db, agent_id)
-        memory = mm.create_memory(
-            title=request.title, content=request.content,
-            memory_type=request.memory_type,
-            importance_score=request.importance_score,
-            emotional_valence=request.emotional_valence,
-            is_autobiographical=request.is_autobiographical,
-            relates_to_topics=request.relates_to_topics,
-        )
-        return {"id": memory.id, "title": memory.title}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/agents/{agent_id}/memories/search", tags=["Memory"])
-async def search_memories(agent_id: str, request: SearchMemoriesRequest, db: Session = Depends(get_db)):
-    try:
-        mm = MemoryManager(db, agent_id)
-        memories = mm.search_memories_semantic(
-            query=request.query, top_k=request.top_k, memory_types=request.memory_types
-        )
-        return {
-            "results": [
-                {"id": m.id, "title": m.title, "type": m.type.name if m.type else "unknown",
-                 "importance": m.importance_score}
-                for m in memories
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -803,13 +438,6 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/agents/{agent_id}/documents/search", tags=["Documents"])
-async def search_documents(agent_id: str, request: DocumentSearchRequest, db: Session = Depends(get_db)):
-    service = DocumentServiceCognitive(db)
-    results = service.search_documents_semantic(agent_id=agent_id, query=request.query, top_k=request.top_k)
-    return {"results": results}
-
-
 # ============================================================================
 # ENDPOINTS - MICRO-AGENTES
 # ============================================================================
@@ -818,44 +446,6 @@ async def search_documents(agent_id: str, request: DocumentSearchRequest, db: Se
 async def list_micro_agents(agent_id: str, db: Session = Depends(get_db)):
     service = AgentServiceCognitive(db)
     return {"micro_agents": service.get_agent_micro_agents(agent_id)}
-
-
-@app.post("/agents/{agent_id}/micro-agents/reinitialize", tags=["Cognition"])
-async def reinitialize_micro_agents(agent_id: str, db: Session = Depends(get_db)):
-    service = AgentServiceCognitive(db)
-    agent = service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agente não encontrado")
-
-    from data.schema_cognitive import MicroAgent
-    db.query(MicroAgent).filter(MicroAgent.agent_id == agent_id).delete()
-    db.commit()
-    service._create_agent_micro_agents(agent_id)
-    micro_agents = service.get_agent_micro_agents(agent_id)
-    return {"message": "Micro-agentes reinicializados", "micro_agents_count": len(micro_agents)}
-
-
-# ============================================================================
-# ENDPOINTS - LEARNING STATS
-# ============================================================================
-
-@app.get("/agents/{agent_id}/learning-stats", tags=["Learning"])
-async def get_learning_stats(agent_id: str, db: Session = Depends(get_db)):
-    from data.schema_cognitive import LearningEvent, SynapticConnection
-    from sqlalchemy import func
-
-    events = db.query(LearningEvent).filter(LearningEvent.agent_id == agent_id).count()
-    connections = db.query(SynapticConnection).filter(SynapticConnection.agent_id == agent_id).count()
-    by_type = db.query(LearningEvent.feedback_type, func.count(LearningEvent.id)).filter(
-        LearningEvent.agent_id == agent_id
-    ).group_by(LearningEvent.feedback_type).all()
-
-    return {
-        "agent_id": agent_id,
-        "total_learning_events": events,
-        "synaptic_connections": connections,
-        "events_by_type": {t: c for t, c in by_type if t}
-    }
 
 
 # ============================================================================
@@ -867,11 +457,10 @@ async def get_dashboard_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Estatísticas reais para a dashboard do utilizador."""
     from data.schema_cognitive import (
         Memory, Document, MicroAgent,
         ConversationSession, ConversationMessage,
-        LearningEvent, SynapticConnection,
+        LearningEvent,
     )
     from sqlalchemy import func
 
@@ -889,7 +478,6 @@ async def get_dashboard_stats(
     total_conversations = 0
     total_messages = 0
     total_learning = 0
-    total_synapses = 0
 
     if agent_ids:
         total_memories = db.query(func.count(Memory.id)).filter(Memory.agent_id.in_(agent_ids)).scalar() or 0
@@ -903,7 +491,6 @@ async def get_dashboard_stats(
             .scalar() or 0
         )
         total_learning = db.query(func.count(LearningEvent.id)).filter(LearningEvent.agent_id.in_(agent_ids)).scalar() or 0
-        total_synapses = db.query(func.count(SynapticConnection.id)).filter(SynapticConnection.agent_id.in_(agent_ids)).scalar() or 0
 
     agents_summary = []
     for a in user_agents:
@@ -964,7 +551,6 @@ async def get_dashboard_stats(
             "conversations": total_conversations,
             "messages": total_messages,
             "learning_events": total_learning,
-            "synaptic_connections": total_synapses,
         },
         "agents": agents_summary,
         "recent_conversations": recent_conversations,
@@ -973,31 +559,3 @@ async def get_dashboard_stats(
             "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
         },
     }
-
-
-# ============================================================================
-# ROOT
-# ============================================================================
-
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "message": "Sistema de Humanos Virtuais v3.0",
-        "status": "active",
-        "endpoints": {
-            "create_persona": "POST /personas",
-            "chat": "POST /personas/{id}/chat",
-            "blueprint": "GET /personas/{id}/blueprint",
-            "state": "GET /personas/{id}/state",
-            "template": "GET /personas/template",
-            "docs": "/docs"
-        }
-    }
-
-
-@app.get("/chat", tags=["Chat"])
-async def serve_chat():
-    chat_file = os.path.join(os.path.dirname(__file__), "..", "static", "chat.html")
-    if os.path.exists(chat_file):
-        return FileResponse(chat_file)
-    raise HTTPException(status_code=404, detail="Chat interface not found")

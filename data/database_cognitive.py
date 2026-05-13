@@ -18,10 +18,10 @@ def init_cognitive_db(database_url: str):
     try:
         engine = create_engine(database_url)
         Base.metadata.create_all(engine)
-        logger.info("Base de dados cognitiva + persona inicializada com sucesso")
+        logger.info("[db] schema inicializado")
         return engine
     except Exception as e:
-        logger.error(f"Erro ao inicializar BD: {e}")
+        logger.error(f"[db] erro: {e}")
         raise
 
 

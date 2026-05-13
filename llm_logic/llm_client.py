@@ -10,12 +10,14 @@ import os
 import logging
 import requests
 
+logger = logging.getLogger(__name__)
+
+
 class LLMClient:
     """Cliente LLM para Ollama"""
 
     def __init__(self):
         self.provider = "ollama"
-        self.logger = logging.getLogger("agent_system")
 
         # Configuração do Ollama
         ollama_base_url = settings.ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -84,20 +86,13 @@ class LLMClient:
                             models_list.append(m['name'])
 
                 if models_list:
-                    self.logger.info(f"Modelos Ollama disponíveis: {models_list}")
-                    # If configured model not available, pick the first available
+                    logger.debug(f"Modelos Ollama: {models_list}")
                     if self.model not in models_list:
                         chosen = models_list[0]
-                        self.logger.info(f"Modelo configurado '{self.model}' não encontrado em Ollama. Usando '{chosen}'")
+                        logger.info(f"Modelo '{self.model}' indisponível, usando '{chosen}'")
                         self.model = chosen
-            else:
-                self.logger.debug(f"Não foi possível listar modelos Ollama: HTTP {resp.status_code}")
-        except Exception as e:
-            # Não falhar se a lista não puder ser obtida
-            try:
-                self.logger.debug(f"Erro ao consultar modelos Ollama: {e}")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def chat_completion(
         self,
@@ -121,39 +116,31 @@ class LLMClient:
         model_name = model or self.model
 
         try:
-            # Logging para debug
-            logger = logging.getLogger("agent_system")
-            logger.debug(f"LLMClient.chat_completion: provider={self.provider}, model={model_name}, temp={temperature}")
-            
             response = self.client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            result = response.choices[0].message.content
-            logger.debug(f"  -> Resposta recebida: {len(result)} chars")
-            return result
+            return response.choices[0].message.content
         except Exception as e:
-            # Se o erro indicar modelo não encontrado, tenta fallback
             err_text = str(e).lower()
             if "not found" in err_text or "404" in err_text:
                 try:
                     fallback = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
                     if fallback and fallback != model_name:
-                        self.logger.warning(f"Ollama: modelo '{model_name}' não encontrado, tentando fallback '{fallback}'")
+                        logger.warning(f"Modelo '{model_name}' não encontrado, fallback '{fallback}'")
                         response = self.client.chat.completions.create(
                             model=fallback,
                             messages=messages,
                             temperature=temperature,
                             max_tokens=max_tokens
                         )
-                        # Atualiza modelo atual para evitar repetir erro
                         self.model = fallback
                         return response.choices[0].message.content
                 except Exception:
                     pass
-            raise Exception(f"Erro ao gerar resposta do LLM (Ollama): {str(e)}")
+            raise Exception(f"LLM erro ({self.provider}): {e}")
 
     def generate(
         self,

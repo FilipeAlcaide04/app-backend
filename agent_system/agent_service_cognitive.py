@@ -5,8 +5,8 @@ Operações CRUD e integração com sistema cognitivo
 
 from sqlalchemy.orm import Session
 from data.schema_cognitive import (
-    Agent, MicroAgent, MicroAgentType, Memory, MemoryType, 
-    AgentRelationship, AuditLog, ThoughtProcess
+    Agent, MicroAgent, MicroAgentType, Memory, MemoryType,
+    AuditLog, ThoughtProcess
 )
 from agent_system.memory_manager_cognitive import MemoryManager, MemoryTypeEnum
 from agent_system.cognitive_orchestrator import CognitiveOrchestrator
@@ -180,7 +180,7 @@ class AgentServiceCognitive:
         # Auditoria
         self._audit_action(agent_id, "create", "agent", agent_id)
         
-        logger.info(f"Agente {name} ({agent_id}) criado com sucesso")
+        logger.info(f"[agent] criado: {name} ({agent_id})")
         
         return agent
     
@@ -218,7 +218,7 @@ class AgentServiceCognitive:
                 ).first()
                 
                 if not agent_type:
-                    logger.warning(f"Tipo de micro-agente '{type_name}' não existe no banco")
+                    logger.warning(f"[micro-agent] tipo '{type_name}' não existe")
                     failed_agents.append(type_name)
                     continue
                 
@@ -241,15 +241,15 @@ class AgentServiceCognitive:
                 created_agents.append(type_name)
                 
             except Exception as e:
-                logger.error(f"Erro ao criar micro-agente '{type_name}': {e}")
+                logger.error(f"[micro-agent] erro ao criar '{type_name}': {e}")
                 failed_agents.append(type_name)
         
         self.db.commit()
         
         # Log informativo
-        logger.info(f"Agente {agent_id}: {len(created_agents)} micro-agentes criados: {', '.join(created_agents)}")
+        logger.info(f"[micro-agent] {agent_id}: {len(created_agents)} criados ({', '.join(created_agents)})")
         if failed_agents:
-            logger.warning(f"Agente {agent_id}: {len(failed_agents)} micro-agentes falharam: {', '.join(failed_agents)}")
+            logger.warning(f"[micro-agent] {agent_id}: {len(failed_agents)} falharam ({', '.join(failed_agents)})")
     
     # ========== OBTER AGENTE ==========
     
@@ -446,71 +446,6 @@ class AgentServiceCognitive:
         )
         
         return result
-    
-    # ========== RELACIONAMENTOS ==========
-    
-    def create_relationship(
-        self,
-        agent_a_id: str,
-        agent_b_id: str,
-        relationship_type: str = "acquaintance",
-        trust_level: float = 0.5,
-        affinity: float = 0.0,
-    ) -> AgentRelationship:
-        """Cria relacionamento entre dois agentes"""
-        
-        # Verificar que ambos existem
-        if not self.get_agent(agent_a_id) or not self.get_agent(agent_b_id):
-            raise ValueError("Um ou ambos os agentes não existem")
-        
-        # Verificar se já existe
-        existing = self.db.query(AgentRelationship).filter(
-            ((AgentRelationship.agent_a_id == agent_a_id) & (AgentRelationship.agent_b_id == agent_b_id)) |
-            ((AgentRelationship.agent_a_id == agent_b_id) & (AgentRelationship.agent_b_id == agent_a_id))
-        ).first()
-        
-        if existing:
-            return existing
-        
-        relationship = AgentRelationship(
-            agent_a_id=agent_a_id,
-            agent_b_id=agent_b_id,
-            relationship_type=relationship_type,
-            trust_level=max(0.0, min(1.0, trust_level)),
-            affinity=max(-1.0, min(1.0, affinity)),
-        )
-        
-        self.db.add(relationship)
-        self.db.commit()
-        
-        return relationship
-    
-    def update_relationship(
-        self,
-        agent_a_id: str,
-        agent_b_id: str,
-        **updates,
-    ) -> Optional[AgentRelationship]:
-        """Atualiza relacionamento"""
-        
-        relationship = self.db.query(AgentRelationship).filter(
-            ((AgentRelationship.agent_a_id == agent_a_id) & (AgentRelationship.agent_b_id == agent_b_id)) |
-            ((AgentRelationship.agent_a_id == agent_b_id) & (AgentRelationship.agent_b_id == agent_a_id))
-        ).first()
-        
-        if not relationship:
-            return None
-        
-        allowed_fields = {'relationship_type', 'trust_level', 'affinity'}
-        
-        for field, value in updates.items():
-            if field in allowed_fields:
-                setattr(relationship, field, value)
-        
-        relationship.updated_at = datetime.utcnow()
-        self.db.commit()
-        
-        return relationship
     
     # ========== MEMÓRIAS ==========
     

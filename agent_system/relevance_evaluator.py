@@ -83,7 +83,8 @@ class RelevanceEvaluator:
                 "should_execute": is_relevant and score >= relevance_threshold
             }
         
-        logger.info(f"Avaliação de relevância para {self.agent_id}: {sum(1 for e in evaluations.values() if e['should_execute'])} de {len(evaluations)} agentes")
+        active = sum(1 for e in evaluations.values() if e["should_execute"])
+        logger.debug(f"[relevance] {active}/{len(evaluations)} micro-agentes activos")
         
         return evaluations
     

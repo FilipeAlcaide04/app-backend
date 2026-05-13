@@ -548,6 +548,4 @@ def seed_admin_user(db: Session):
         admin.set_password("admin")
         db.add(admin)
         db.commit()
-        logger.info("Admin user criado: admin@admin.ai")
-    else:
-        logger.info("Admin user já existe: admin@admin.ai")
+        logger.info("[auth] admin criado: admin@admin.ai")

@@ -15,7 +15,7 @@ faz o LLM "ser" esta pessoa. Inclui:
 
 from sqlalchemy.orm import Session
 from data.schema_cognitive import (
-    Agent, PersonalityProfile, ConsciousnessState,
+    Agent, PersonalityProfile,
     RelationshipBond, Memory
 )
 from data.schema_persona import (
