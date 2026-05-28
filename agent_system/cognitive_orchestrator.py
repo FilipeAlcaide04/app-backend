@@ -76,6 +76,7 @@ class CognitiveOrchestrator:
             MicroAgent.activation_enabled == True
         ).all()
 
+        existing_types = set()
         for instance in instances:
             try:
                 agent_type = self.db.query(MicroAgentType).filter(
@@ -83,6 +84,7 @@ class CognitiveOrchestrator:
                 ).first()
                 if not agent_type:
                     continue
+                existing_types.add(agent_type.name)
                 micro_agent = create_micro_agent(
                     agent_id=self.agent_id,
                     micro_agent_id=instance.id,
@@ -92,6 +94,36 @@ class CognitiveOrchestrator:
                 micro_agents[agent_type.name] = micro_agent
             except Exception as e:
                 logger.error(f"Erro ao inicializar micro-agente {instance.id}: {e}")
+
+        # Auto-add missing builtin micro-agents
+        required = ["memory_curator", "imagination"]
+        for type_name in required:
+            if type_name not in existing_types:
+                try:
+                    agent_type = self.db.query(MicroAgentType).filter(
+                        MicroAgentType.name == type_name
+                    ).first()
+                    if agent_type:
+                        from uuid import uuid4
+                        new_instance = MicroAgent(
+                            id=str(uuid4()),
+                            agent_id=self.agent_id,
+                            type_id=agent_type.id,
+                            custom_weight=agent_type.default_weight,
+                            activation_enabled=True,
+                        )
+                        self.db.add(new_instance)
+                        self.db.flush()
+                        micro_agent = create_micro_agent(
+                            agent_id=self.agent_id,
+                            micro_agent_id=new_instance.id,
+                            thinking_type=type_name,
+                            db=self.db,
+                        )
+                        micro_agents[type_name] = micro_agent
+                        logger.info(f"[init] Auto-added missing micro-agent: {type_name}")
+                except Exception as e:
+                    logger.warning(f"[init] Failed to auto-add {type_name}: {e}")
 
         return micro_agents
 
@@ -110,6 +142,7 @@ class CognitiveOrchestrator:
         logger.info(f"[think] agente={self.agent_id} query=\"{query[:60]}...\"")
         context = context or {}
         start_time = datetime.utcnow()
+        context["latest_user_query"] = query
 
         # === FASE 0: CONTEXTO DE CONVERSA ===
         # Obter sessão de conversa e contexto de sessões anteriores
@@ -125,6 +158,8 @@ class CognitiveOrchestrator:
         conv_context = self.conversations.build_conversation_context(session)
         context["conversation_history"] = conv_context.get("current_messages", [])
         context["previous_sessions"] = conv_context.get("previous_sessions", [])
+        context["conversation_memory"] = conv_context.get("live_memory", {})
+        context["conversation_thread"] = self._build_conversation_thread(context["conversation_history"])
 
         # Estado da última sessão (para continuidade emocional)
         last_state = self.conversations.get_last_session_state(user_id or "default_user")
@@ -165,7 +200,13 @@ class CognitiveOrchestrator:
             logger.debug(f"[FASE 2] DOCUMENTOS: Não necessário consultar documentos para esta pergunta")
 
         # === FASE 3: MEMÓRIAS ===
-        memories = self.memory_manager.recall_relevant_memories(query, limit=5)
+        conversation_memory_text = json.dumps(context.get("conversation_memory", {}), ensure_ascii=False)
+        memory_query = f"{conversation_memory_text}\n{context.get('conversation_thread', '')}\n{query}".strip()
+        memory_awareness = self.memory_manager.build_memory_awareness(
+            query=query,
+            conversation_context=memory_query,
+        )
+        memories = memory_awareness.get("memories", [])
         context["memory"] = [
             {
                 "id": mem.id, "title": mem.title, "content": mem.content,
@@ -175,8 +216,15 @@ class CognitiveOrchestrator:
             }
             for mem in memories
         ]
+        context["existing_memories"] = context["memory"]
+        context["memory_awareness"] = memory_awareness.get("summary", "")
 
-        logger.info(f"[FASE 3] MEMÓRIAS: Recuperadas {len(memories)} memórias relevantes")
+        logger.info(
+            f"[FASE 3] MEMÓRIAS: Recuperadas {len(memories)} memórias relevantes "
+            f"({memory_awareness.get('total_considered', len(memories))} consideradas)"
+        )
+        if context["memory_awareness"]:
+            logger.info(f"[FASE 3] Consciência de memória:\n{context['memory_awareness']}")
         for i, mem in enumerate(memories, 1):
             logger.info(f"  {i}. [{mem.type.name if mem.type else '?'}] {mem.title}")
             logger.debug(f"     - Importância: {mem.importance_score:.2f}, Valência Emocional: {mem.emotional_valence}")
@@ -187,6 +235,11 @@ class CognitiveOrchestrator:
 
         # Identidade e estado
         context["agent_identity"] = self.get_agent_identity()
+
+        # Relação com o utilizador (disponível para todos os micro-agentes)
+        if user_id:
+            context["relationship_snapshot"] = self.identity.get_relationship_snapshot(user_id)
+            context["user_id"] = user_id
 
         if doc_context.get("has_documents"):
             context["documents_context"] = doc_context.get("context_text", "")
@@ -222,7 +275,9 @@ class CognitiveOrchestrator:
         if record_process:
             self.thought_process = ThoughtProcess(
                 agent_id=self.agent_id,
+                conversation_id=session.id,
                 query=query,
+                context=context,
                 status="thinking",
                 start_time=start_time,
             )
@@ -252,9 +307,12 @@ class CognitiveOrchestrator:
         )
 
         # Actualizar metadata da sessão
+        live_mem = context.get("conversation_memory", {})
         self.conversations.update_session_metadata(
             session,
+            topic=live_mem.get("current_topic") or None,
             emotional_tone=emotional_reaction.get("current_mood"),
+            unresolved=live_mem.get("pending_user_question") or None,
         )
 
         # === FASE 9: REGISTAR PROCESSO ===
@@ -316,10 +374,26 @@ class CognitiveOrchestrator:
         logger.info(f"   ⏱️  Tempo total: {duration_ms}ms")
         logger.info(f"   📊 Memórias usadas: {len(memories)} de {len(context.get('memory', []))}")
         logger.info(f"   🧠 Micro-agentes: {len(thinking_results)} pensando em paralelo")
-        logger.info(f"   💬 Resposta: {agent_response_text[:100]}...")
+        logger.info(f"   💬 Resposta final completa:\n{agent_response_text}")
         logger.info(f"   🎯 Confiança: {final_response.get('confidence', 0):.0%}")
 
         return final_response
+
+    def _build_conversation_thread(self, messages: List[Dict[str, Any]], limit: int = 6) -> str:
+        if not messages:
+            return ""
+
+        persona_name = self.agent.name or "Persona"
+        recent = messages[-limit:]
+        parts = []
+        for msg in recent:
+            role = msg.get("role")
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            label = "Utilizador" if role == "user" else persona_name if role == "assistant" else role
+            parts.append(f"{label}: {content[:240]}")
+        return "\n".join(parts)
 
     def process_feedback(
         self,
@@ -355,7 +429,10 @@ class CognitiveOrchestrator:
                 result = await task
                 results[agent_type] = result
                 logger.info(f"[FASE 6.1] ✓ {agent_type} pensamento completo: confiança={result.get('confidence', 0):.2f}, peso={result.get('weight', 1.0):.2f}")
-                logger.debug(f"  Perspectiva: '{result.get('perspective', 'N/A')[:100]}...'")
+                logger.info(
+                    f"[FASE 6.1][OUTPUT COMPLETO] {agent_type}\n"
+                    f"{result.get('perspective', 'N/A')}"
+                )
             except Exception as e:
                 logger.error(f"[FASE 6.1] ✗ Erro em {agent_type}: {e}")
                 results[agent_type] = self._error_result(e)
@@ -403,6 +480,7 @@ class CognitiveOrchestrator:
         base = {
             "id": self.agent.id,
             "name": self.agent.name,
+            "language": self.agent.language,
             "personality_traits": self.agent.personality_traits,
             "base_values": self.agent.base_values,
             "thinking_style": self.agent.thinking_style,

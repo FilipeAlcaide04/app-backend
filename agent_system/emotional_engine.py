@@ -14,10 +14,12 @@ Integra com PersonaEngine para:
 from sqlalchemy.orm import Session
 from data.schema_cognitive import Agent, Memory, MemoryType, PersonalityProfile
 from data.schema_persona import PersonaBlueprint, DynamicState, BehavioralLog
+from agent_system.prompt_manager import PromptManager
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import math
 import re
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,50 +31,8 @@ class EmotionalEngine:
     Não apenas Big Five - usa attachment, trauma, defenses, needs, tudo.
     """
 
-    # === DETECÇÃO DE INTENÇÃO ===
-
-    INSULT_PATTERNS = [
-        r"\b(idiota|estúpido|burro|imbecil|parvo|palhaço|lixo|nojo|porcaria)\b",
-        r"\b(cala.te|cala.a.boca|caluda|vai.te|desaparece)\b",
-        r"\b(inútil|incompetente|fraco|patético|ridículo|nojento)\b",
-        r"\b(odei[oa]|detest[oa]|não.presta|és.um|tu.és.um?)\b",
-        r"\b(fod[ae]|crl|caralho|merda|puta|cona|pila)\b",
-        r"\b(vai.à.merda|vai.para|vai.te.foder)\b",
-        r"\b(não.serves|não.vales|és.péssimo|és.horrível)\b",
-        r"\b(que.lixo|que.nojo|és.uma.fraude)\b",
-    ]
-
-    PRAISE_PATTERNS = [
-        r"\b(obrigad[oa]|muito.obrigad[oa]|agradeço)\b",
-        r"\b(incrível|fantástico|excelente|maravilhos[oa]|genial)\b",
-        r"\b(gosto.de.ti|adoro.te|amo.te|és.fix[eo]|és.o.máximo)\b",
-        r"\b(muito.bem|boa|bom.trabalho|perfeito|impecável)\b",
-        r"\b(inteligente|esperto|brilhante|impressionante)\b",
-    ]
-
-    AGGRESSIVE_PATTERNS = [
-        r"\b(vou.te|vou-te|ameaç[oa]|mat[oa]r|destruir)\b",
-        r"\b(acabar.contigo|eliminar|apagar.te)\b",
-    ]
-
-    DISMISSIVE_PATTERNS = [
-        r"\b(cala|deixa|para|chega|basta|chato)\b",
-        r"\b(não.interessa|tanto.faz|que.seja|whatever)\b",
-    ]
-
-    EMOTION_KEYWORDS = {
-        "joy": ["feliz", "alegre", "contente", "ótimo", "maravilhoso", "incrível", "adoro", "amo", "fantástico", "fixe", "topo"],
-        "sadness": ["triste", "chateado", "deprimido", "mal", "péssimo", "horrível", "chorar", "lágrimas", "dor", "sofro"],
-        "anger": ["raiva", "furioso", "irritado", "zangado", "odeio", "detesto", "merda", "frustrado", "farto"],
-        "fear": ["medo", "ansioso", "preocupado", "nervoso", "assustado", "terror", "pânico", "receio"],
-        "surprise": ["surpreso", "chocado", "incrível", "não acredito", "sério", "a sério", "wow", "uau"],
-        "trust": ["confio", "acredito", "seguro", "confiança", "verdade", "honesto", "sincero"],
-        "anticipation": ["ansioso", "expectativa", "espero", "mal posso esperar", "empolgado", "curioso"],
-        "gratitude": ["obrigado", "agradeço", "grato", "gratidão", "valeu"],
-        "disgust": ["nojo", "repugnante", "asqueroso", "insuportável"],
-        "loneliness": ["sozinho", "solitário", "ninguém", "abandonado", "isolado"],
-        "love": ["amo", "adoro", "amor", "carinho", "querido", "especial"],
-    }
+    # A classificação emocional da mensagem é semântica e configurável em BD
+    # (`emotion.intent_analysis`), não uma lista de palavras fixa.
 
     def __init__(self, db: Session, agent_id: str):
         self.db = db
@@ -81,6 +41,7 @@ class EmotionalEngine:
         self.state: Optional[DynamicState] = None
         self.personality: Dict[str, float] = {}
         self.traumatic_triggers: List[Dict] = []
+        self.prompts = PromptManager(db)
 
         self._load()
 
@@ -278,73 +239,99 @@ class EmotionalEngine:
     def analyze_user_intent(self, text: str) -> Dict[str, Any]:
         """Analisa intenção do utilizador de forma completa"""
 
-        text_lower = text.lower()
         analysis = {
             "is_insult": False, "is_praise": False,
             "is_aggressive": False, "is_dismissive": False,
             "insult_intensity": 0.0, "praise_intensity": 0.0,
             "traumatic_trigger": None, "user_emotions": {},
             "is_vulnerable": False, "is_seeking_connection": False,
+            "is_benign_personal_question": False,
+            "is_warm": False,
         }
 
-        # Insultos
-        for p in self.INSULT_PATTERNS:
-            if re.search(p, text_lower):
-                analysis["is_insult"] = True
-                analysis["insult_intensity"] += 0.3
-        analysis["insult_intensity"] = min(1.0, analysis["insult_intensity"])
-
-        # Elogios
-        for p in self.PRAISE_PATTERNS:
-            if re.search(p, text_lower):
-                analysis["is_praise"] = True
-                analysis["praise_intensity"] += 0.25
-        analysis["praise_intensity"] = min(1.0, analysis["praise_intensity"])
-
-        # Agressão
-        for p in self.AGGRESSIVE_PATTERNS:
-            if re.search(p, text_lower):
-                analysis["is_aggressive"] = True
-
-        # Desprezo
-        for p in self.DISMISSIVE_PATTERNS:
-            if re.search(p, text_lower):
-                analysis["is_dismissive"] = True
-
-        # Emoções do utilizador
-        analysis["user_emotions"] = self._detect_user_emotions(text_lower)
-
-        # Vulnerabilidade (user a partilhar algo pessoal/difícil)
-        vuln_patterns = [
-            r"(preciso de ajuda|não sei o que fazer|estou perdido|tenho medo)",
-            r"(sinto.me sozinho|ninguém me entende|estou triste|quero desistir)",
-        ]
-        for p in vuln_patterns:
-            if re.search(p, text_lower):
-                analysis["is_vulnerable"] = True
-
-        # Busca de conexão
-        conn_patterns = [
-            r"(como estás|tudo bem|conta.me|fala.me|o que achas)",
-            r"(quero conversar|precisava de falar|posso desabafar)",
-        ]
-        for p in conn_patterns:
-            if re.search(p, text_lower):
-                analysis["is_seeking_connection"] = True
+        semantic = self._semantic_intent_analysis(text)
+        for key in analysis:
+            if key in semantic and key != "traumatic_trigger":
+                analysis[key] = semantic[key]
 
         # Triggers traumáticos
-        analysis["traumatic_trigger"] = self._check_triggers(text_lower)
+        analysis["traumatic_trigger"] = self._check_triggers(text.lower())
 
         return analysis
 
-    def _detect_user_emotions(self, text: str) -> Dict[str, float]:
-        """Detecta emoções no texto"""
-        detected = {}
-        for emotion, keywords in self.EMOTION_KEYWORDS.items():
-            score = sum(0.3 for kw in keywords if kw in text)
-            if score > 0:
-                detected[emotion] = min(1.0, score)
-        return detected
+    def _semantic_intent_analysis(self, text: str) -> Dict[str, Any]:
+        """Classifica intenção/emoções por LLM usando template editável em BD."""
+        if not text.strip():
+            return {}
+
+        persona_context = {}
+        if self.blueprint:
+            persona_context = {
+                "identity": (self.blueprint.identity or {}),
+                "attachment": (self.blueprint.emotional_config or {}).get("attachment_style"),
+                "emotional_patterns": (self.blueprint.emotional_config or {}).get("emotional_patterns"),
+                "defenses": (self.blueprint.personality_full or {}).get("defense_mechanisms"),
+            }
+
+        current_state = {}
+        if self.state:
+            current_state = {
+                "mood": self.state.current_mood,
+                "primary_emotion": self.state.primary_emotion,
+                "stress": self.state.current_stress_load,
+                "valence": self.state.valence,
+                "arousal": self.state.arousal,
+                "active_defenses": self.state.active_defenses,
+            }
+
+        prompt = self.prompts.render(
+            "emotion.intent_analysis",
+            message=text[:2500],
+            persona_context=json.dumps(persona_context, ensure_ascii=False)[:1600],
+            current_state=json.dumps(current_state, ensure_ascii=False)[:1000],
+        )
+        if not prompt:
+            return {}
+
+        try:
+            from llm_logic.llm_client import LLMClient
+            raw = LLMClient().generate(prompt, max_tokens=450, temperature=0.1).strip()
+            data = self._parse_json(raw)
+            if not isinstance(data, dict):
+                return {}
+
+            cleaned: Dict[str, Any] = {}
+            bool_keys = [
+                "is_insult", "is_praise", "is_aggressive", "is_dismissive",
+                "is_vulnerable", "is_seeking_connection",
+                "is_benign_personal_question", "is_warm",
+            ]
+            for key in bool_keys:
+                cleaned[key] = bool(data.get(key, False))
+            for key in ["insult_intensity", "praise_intensity"]:
+                value = data.get(key, 0.0)
+                cleaned[key] = max(0.0, min(1.0, float(value if isinstance(value, (int, float)) else 0.0)))
+
+            emotions = data.get("user_emotions") or {}
+            cleaned["user_emotions"] = {
+                str(k): max(0.0, min(1.0, float(v)))
+                for k, v in emotions.items()
+                if isinstance(v, (int, float)) and float(v) > 0
+            } if isinstance(emotions, dict) else {}
+            return cleaned
+        except Exception as e:
+            logger.debug(f"[emotion] análise semântica falhou: {e}")
+            return {}
+
+    def _parse_json(self, raw: str) -> Dict[str, Any]:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(raw[start:end + 1])
+            raise
 
     def _check_triggers(self, text: str) -> Optional[Dict]:
         """Verifica triggers traumáticos"""
@@ -361,16 +348,25 @@ class EmotionalEngine:
 
             # Check explicit trigger phrases (e.g. "despedidas", "silêncio prolongado")
             explicit_triggers = trigger.get("explicit_triggers", [])
-            explicit_match = any(
-                et.lower() in text or any(w in text for w in et.lower().split() if len(w) >= 3)
-                for et in explicit_triggers
-            )
+            explicit_match = False
+            for et in explicit_triggers:
+                et_lower = str(et).lower().strip()
+                if not et_lower:
+                    continue
+                if et_lower in text:
+                    explicit_match = True
+                    break
+                words = [w for w in re.findall(r"\b[a-záàâãéèêíìîóòôõúùûç]{4,}\b", et_lower)]
+                if len(words) >= 2 and all(w in text for w in words):
+                    explicit_match = True
+                    break
 
             # Score: keyword matches + bonus for explicit trigger match
             score = matches + (3 if explicit_match else 0)
 
-            # Threshold: 1 keyword match OR explicit trigger hit
-            if score >= 1 and score > best_score:
+            # Um match genérico isolado ("friend", "name", etc.) não chega para activar trauma.
+            threshold = 1 if explicit_match else max(2, min(4, len(keywords) // 4 or 2))
+            if score >= threshold and score > best_score:
                 best_score = score
                 # Intensity scales with base severity, boosted by match quality
                 base_intensity = trigger.get("intensity", 0.7)
@@ -539,6 +535,7 @@ class EmotionalEngine:
             changes["valence"] = final_joy * 0.5
             changes["pride"] = final_joy * 0.4
             changes["gratitude"] = final_joy * 0.3
+            changes["stress_relief"] = final_joy * 0.12
 
             # Attachment com elogios
             if attachment == "anxious-preoccupied":
@@ -600,6 +597,7 @@ class EmotionalEngine:
             changes["sadness"] = 0.1 * empathy
             changes["trust"] = 0.15
             changes["love"] = 0.1 * empathy
+            changes["stress_relief"] = 0.10 + empathy * 0.08
 
             reaction_type = "empathetic_supportive"
             response_modifier = {"tone": "supportive", "be_caring": True, "be_gentle": True}
@@ -610,16 +608,30 @@ class EmotionalEngine:
 
         # ── BUSCA DE CONEXÃO ──
         elif intent["is_seeking_connection"]:
-            changes["joy"] = 0.15
-            changes["trust"] = 0.1
-            changes["valence"] = 0.1
+            changes["joy"] = 0.2
+            changes["trust"] = 0.15
+            changes["valence"] = 0.15
+            changes["stress_relief"] = 0.15
+            changes["hope"] = 0.1
 
-            self._satisfy_need("connection", 0.15)
+            self._satisfy_need("connection", 0.2)
 
             reaction_type = "receptive"
             response_modifier = {"tone": "warm", "be_open": True}
             should_express = True
-            intensity = 0.3
+            intensity = 0.35
+
+        # ── CURIOSIDADE PESSOAL BENIGNA ──
+        elif intent["is_benign_personal_question"]:
+            changes["trust"] = 0.06
+            changes["anticipation"] = 0.05
+            changes["valence"] = 0.04
+            changes["stress_relief"] = 0.05
+
+            reaction_type = "curious_guarded"
+            response_modifier = {"tone": "guarded", "answer_directly": True}
+            should_express = True
+            intensity = 0.18
 
         # ── NEUTRO COM EMOÇÕES DO USER ──
         else:
@@ -638,6 +650,16 @@ class EmotionalEngine:
                 elif emo in ["fear", "anger"]:
                     changes[emo] = changes.get(emo, 0) + val * empathy * 0.15
 
+            # If the message is warm (kind, neutral, greeting), give a baseline positive nudge
+            if intent.get("is_warm") and not user_emo:
+                changes["trust"] = changes.get("trust", 0) + 0.04
+                changes["valence"] = changes.get("valence", 0) + 0.06
+                changes["stress_relief"] = changes.get("stress_relief", 0) + 0.06
+                reaction_type = "receptive"
+                response_modifier = {"tone": "neutral_warm"}
+                should_express = False
+                intensity = 0.15
+
             intensity = sum(abs(v) for v in changes.values()) / max(1, len(changes)) if changes else 0
 
         # ── TRIGGER TRAUMÁTICO (override forte — traumas dominam) ──
@@ -645,16 +667,18 @@ class EmotionalEngine:
             trigger = intent["traumatic_trigger"]
             t_intensity = trigger["intensity"]
 
-            # Trauma DOMINA o estado emocional — aumenta negativos, reduz positivos
-            changes["fear"] = changes.get("fear", 0) + t_intensity * 0.8
-            changes["arousal"] = changes.get("arousal", 0) + t_intensity * 0.5
-            changes["sadness"] = changes.get("sadness", 0) + t_intensity * 0.5
-            changes["anger"] = changes.get("anger", 0) + t_intensity * 0.3
-            changes["valence"] = changes.get("valence", 0) - t_intensity * 0.8
-            # Reduzir emoções positivas — trauma apaga a tranquilidade
-            changes["joy"] = changes.get("joy", 0) - t_intensity * 0.4
-            changes["trust"] = changes.get("trust", 0) - t_intensity * 0.5
-            changes["hope"] = changes.get("hope", 0) - t_intensity * 0.3
+            # If the user is being warm/kind while triggering trauma, reduce the trauma impact
+            if intent.get("is_warm") or intent.get("is_praise") or intent.get("is_seeking_connection"):
+                t_intensity *= 0.5
+
+            changes["fear"] = changes.get("fear", 0) + t_intensity * 0.6
+            changes["arousal"] = changes.get("arousal", 0) + t_intensity * 0.4
+            changes["sadness"] = changes.get("sadness", 0) + t_intensity * 0.4
+            changes["anger"] = changes.get("anger", 0) + t_intensity * 0.2
+            changes["valence"] = changes.get("valence", 0) - t_intensity * 0.5
+            changes["joy"] = changes.get("joy", 0) - t_intensity * 0.2
+            changes["trust"] = changes.get("trust", 0) - t_intensity * 0.3
+            changes["hope"] = changes.get("hope", 0) - t_intensity * 0.2
 
             if neuroticism > 0.6:
                 reaction_type = "traumatic_reactive"
@@ -665,7 +689,6 @@ class EmotionalEngine:
                 response_modifier = {"tone": "withdrawn", "be_brief": True, "change_subject": True}
                 inner_thought = "Preciso de me afastar deste assunto."
 
-            # Se tem beliefs associadas ao trauma, incluir no inner thought
             beliefs = trigger.get("beliefs", [])
             if beliefs:
                 inner_thought += f" ({beliefs[0]})"
@@ -673,6 +696,36 @@ class EmotionalEngine:
             intensity = min(1.0, intensity + t_intensity)
             should_express = True
             defense_active = self._get_defense_for_stress(0.9)
+
+        # ── EMOTIONAL REGULATION ──
+        # Real humans regulate: kindness gradually calms even high-neuroticism people.
+        # If the interaction is non-negative, apply a calming effect proportional to
+        # current negative state — the worse you feel, the more room there is to improve.
+        is_non_negative = not intent["is_insult"] and not intent["is_aggressive"] and not intent["is_dismissive"]
+        if is_non_negative and self.state:
+            regulation_strength = max(0.1, 1.0 - neuroticism * 0.5)
+
+            current_anger = self.state.anger or 0
+            if current_anger > 0.2:
+                changes["anger"] = changes.get("anger", 0) - current_anger * 0.12 * regulation_strength
+
+            current_fear = self.state.fear or 0
+            if current_fear > 0.2:
+                changes["fear"] = changes.get("fear", 0) - current_fear * 0.10 * regulation_strength
+
+            current_sadness = self.state.sadness or 0
+            if current_sadness > 0.2:
+                changes["sadness"] = changes.get("sadness", 0) - current_sadness * 0.06 * regulation_strength
+
+            current_resentment = self.state.resentment or 0
+            if current_resentment > 0.2:
+                changes["resentment"] = changes.get("resentment", 0) - current_resentment * 0.05 * regulation_strength
+
+            # Warmth from user actively pulls valence up
+            if intent.get("is_warm") or intent.get("is_praise") or intent.get("is_seeking_connection"):
+                current_valence = self.state.valence or 0
+                if current_valence < 0:
+                    changes["valence"] = changes.get("valence", 0) + abs(current_valence) * 0.15 * regulation_strength
 
         return {
             "changes": changes,
@@ -755,100 +808,123 @@ class EmotionalEngine:
             s = self.state
 
             # Humor
-            mood = s.current_mood or "neutro"
-            if mood != "neutro":
-                parts.append(f"Neste momento sentes-te {mood}.")
+            mood = s.current_mood or "neutral"
+            if mood not in {"neutro", "neutral"}:
+                parts.append(f"Right now you feel {mood}.")
 
             # Energia
             energy = s.energy_level or 0.7
             if energy < 0.3:
-                parts.append("Estás com pouca energia, cansado.")
+                parts.append("You have very little energy and feel tired.")
             elif energy < 0.5:
-                parts.append("A tua energia está em baixo.")
+                parts.append("Your energy is low.")
             elif energy > 0.8:
-                parts.append("Estás cheio de energia.")
+                parts.append("You are full of energy.")
 
             # Emoções específicas
-            if (s.anger or 0) > 0.6:
-                parts.append("Estás frustrado e irritado.")
-            elif (s.anger or 0) > 0.3:
-                parts.append("Há alguma irritação em ti.")
+            if (s.anger or 0) > 0.7:
+                parts.append("You are frustrated and irritated.")
+            elif (s.anger or 0) > 0.4:
+                parts.append("There is some irritation in you.")
 
             if (s.sadness or 0) > 0.5:
-                parts.append("Uma tristeza pesa-te.")
+                parts.append("Sadness weighs on you.")
 
             if (s.fear or 0) > 0.5:
-                parts.append("Sentes ansiedade ou desconforto.")
+                parts.append("You feel anxiety or discomfort.")
 
             if (s.joy or 0) > 0.6:
-                parts.append("Sentes-te bem, positivo.")
+                parts.append("You feel good and positive.")
 
             if (s.loneliness or 0) > 0.4:
-                parts.append("Sentes-te um pouco solitário.")
+                parts.append("You feel somewhat lonely.")
 
             if (s.resentment or 0) > 0.4:
-                parts.append("Guardas algum ressentimento.")
+                parts.append("You are holding some resentment.")
 
-            if (s.trust or 0.5) < 0.3:
-                parts.append("Não confias muito nesta pessoa.")
+            if (s.trust or 0.5) < 0.2:
+                parts.append("You have some reserve toward the person speaking with you.")
             elif (s.trust or 0.5) > 0.7:
-                parts.append("Sentes-te à vontade com esta pessoa.")
+                parts.append("You feel at ease with the person speaking with you.")
 
             if (s.love or 0) > 0.5:
-                parts.append("Sentes carinho por quem falas.")
+                parts.append("You feel affection for the person you are speaking with.")
 
             if (s.gratitude or 0) > 0.5:
-                parts.append("Sentes gratidão.")
+                parts.append("You feel gratitude.")
 
             # Stress
             stress = s.current_stress_load or 0
             if stress > 0.7:
-                parts.append("Estás muito stressado, perto do limite.")
+                parts.append("You are very stressed, close to your limit.")
             elif stress > 0.5:
-                parts.append("O stress está a acumular-se.")
+                parts.append("Stress is building up.")
 
             # Intoxicação emocional
             if s.intoxication_state == "overwhelmed":
-                parts.append("Estás emocionalmente sobrecarregado, mal consegues pensar com clareza.")
+                parts.append("You are emotionally overwhelmed and can barely think clearly.")
             elif s.intoxication_state == "significantly_altered":
-                parts.append("As tuas emoções estão muito intensas, a nublar o teu pensamento.")
+                parts.append("Your emotions are very intense and clouding your thinking.")
             elif s.intoxication_state == "numb":
-                parts.append("Sentes-te anestesiado, desligado de tudo.")
+                parts.append("You feel numb and disconnected from everything.")
 
             # Necessidades não satisfeitas
             needs_low = []
             if (s.need_connection or 0.5) < 0.3:
-                needs_low.append("precisas de conexão humana")
+                needs_low.append("you need human connection")
             if (s.need_validation or 0.5) < 0.3:
-                needs_low.append("precisas de sentir que vales")
+                needs_low.append("you need to feel valued")
             if (s.need_safety or 0.7) < 0.3:
-                needs_low.append("não te sentes seguro")
+                needs_low.append("you do not feel safe")
 
             if needs_low:
-                parts.append(f"No fundo, {', '.join(needs_low)}.")
+                parts.append(f"Deep down, {', '.join(needs_low)}.")
 
             # Defesas activas
             defenses = s.active_defenses or []
             if defenses:
                 defense_map = {
-                    "humor": "Usas humor para desviar do que realmente sentes.",
-                    "rationalization": "Tendes a racionalizar em vez de sentir.",
-                    "denial": "Parte de ti recusa-se a aceitar o que está a acontecer.",
-                    "dissociation": "Sentes-te desligado, como se não fosse contigo.",
-                    "projection": "Tens tendência a projectar nos outros o que sentes.",
-                    "regression": "Sentes-te pequeno, como uma criança.",
-                    "displacement": "A tua frustração pode sair direccionada ao sítio errado.",
-                    "passive_aggression": "A tua irritação sai de formas indirectas.",
-                    "splitting": "Vês as coisas a preto e branco agora.",
+                    "humor": "You use humor to deflect what you really feel.",
+                    "rationalization": "You tend to rationalize instead of feeling.",
+                    "denial": "Part of you refuses to accept what is happening.",
+                    "dissociation": "You feel disconnected, as if it were not happening to you.",
+                    "projection": "You tend to project what you feel onto others.",
+                    "regression": "You feel small, like a child.",
+                    "displacement": "Your frustration may come out in the wrong direction.",
+                    "passive_aggression": "Your irritation comes out indirectly.",
+                    "splitting": "You see things in black and white right now.",
                 }
                 for d in defenses[:2]:
                     if d in defense_map:
                         parts.append(defense_map[d])
 
+        if response_modifier:
+            tone = response_modifier.get("tone")
+            if tone in {"warm", "supportive", "neutral_warm"}:
+                parts.append("The current message is not hostile; it is an attempt at connection or normal conversation. Let that soften your defenses.")
+            elif tone == "guarded":
+                parts.append("The current message is a legitimate personal question; you may answer with some reserve, but answer it.")
+            elif response_modifier.get("answer_directly"):
+                parts.append("There is a concrete question in this message; give real content instead of avoiding the topic.")
+            if response_modifier.get("be_open"):
+                parts.append("There is room for a small opening without needing to trust completely.")
+            if response_modifier.get("be_caring"):
+                parts.append("The person is vulnerable; respond with care instead of hostility.")
+
+        # Emotional regulation reminder — prevent the bot from being trapped in negativity
+        if self.state:
+            neg_total = sum(getattr(self.state, e, 0) or 0 for e in ["anger", "fear", "sadness", "resentment"])
+            if neg_total > 0.8:
+                parts.append(
+                    "IMPORTANT: Even if you are feeling negative emotions, do not let that turn EVERY response into hostility. "
+                    "Real humans recognize kindness even when they feel bad. "
+                    "Your emotions color the response, but they do not erase your ability to listen and respond to what was actually said."
+                )
+
         if not parts:
             return ""
 
-        return "Estado emocional actual: " + " ".join(parts)
+        return "Current emotional state: " + " ".join(parts)
 
     def get_emotional_modifiers(self) -> Dict[str, Any]:
         """Retorna modificadores numéricos para ajustar resposta"""

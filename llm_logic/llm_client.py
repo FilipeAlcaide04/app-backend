@@ -147,26 +147,28 @@ class LLMClient:
         prompt: str,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         """
-        Método alternativo para gerar texto a partir de um prompt
-        Wrapper para chat_completion com formato de single message
-        
+        Gera texto a partir de um prompt.
+
         Args:
-            prompt: Texto do prompt
+            prompt: Texto do prompt (vai como role=user)
             max_tokens: Máximo de tokens
             temperature: Temperatura para sampling
             model: Modelo a usar (padrão: self.model)
-        
+            system_prompt: Se fornecido, usa como mensagem system em vez do default
+
         Returns:
             Texto gerado
         """
+        system_content = system_prompt or "You are an intelligent, human-centered assistant."
         messages = [
-            {"role": "system", "content": "Você é um assistente inteligente e humanizado."},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt}
         ]
-        
+
         return self.chat_completion(messages, temperature=temperature, max_tokens=max_tokens, model=model)
 
     def get_model_name(self) -> str:

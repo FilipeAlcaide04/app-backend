@@ -94,6 +94,102 @@ class IdentityBuilder:
     def _build_full_persona_prompt(self, user_id: Optional[str] = None) -> str:
         """Constrói prompt completo com toda a informação da persona"""
 
+        bp = self.blueprint
+        sections = [
+            f"You are {self.agent.name}. {self.agent.description or ''}".strip(),
+        ]
+        if self.agent.background_story:
+            sections.append(f"Backstory: {self.agent.background_story}")
+
+        sections.append(
+            "Identity blueprint:\n"
+            f"{json.dumps(bp.identity or {}, ensure_ascii=False)[:1800]}"
+        )
+        sections.append(
+            "Personality blueprint:\n"
+            f"{json.dumps(bp.personality_full or {}, ensure_ascii=False)[:1800]}"
+        )
+        sections.append(
+            "Voice and behavior blueprint:\n"
+            f"{json.dumps((bp.behavior_prompts or {}).get('voice_and_tone') or (bp.behavior_prompts or {}).get('voice') or {}, ensure_ascii=False)[:1200]}\n"
+            f"{json.dumps((bp.social_config or {}).get('communication') or (bp.social_config or {}).get('communication_style') or {}, ensure_ascii=False)[:1200]}\n"
+            f"{json.dumps(bp.behavioral_config or {}, ensure_ascii=False)[:1200]}"
+        )
+        sections.append(
+            "Worldview, values and boundaries:\n"
+            f"{json.dumps(bp.worldview or {}, ensure_ascii=False)[:1400]}\n"
+            f"{json.dumps((bp.behavioral_config or {}).get('boundaries') or (bp.social_config or {}).get('boundaries') or {}, ensure_ascii=False)[:900]}"
+        )
+
+        if self.state:
+            state_data = {
+                "mood": self.state.current_mood,
+                "energy": self.state.energy_level,
+                "stress": self.state.current_stress_load,
+                "primary_emotion": self.state.primary_emotion,
+                "emotion_intensity": self.state.emotion_intensity,
+                "active_defenses": self.state.active_defenses,
+                "needs": {
+                    "connection": self.state.need_connection,
+                    "validation": self.state.need_validation,
+                    "safety": self.state.need_safety,
+                    "autonomy": self.state.need_autonomy,
+                    "meaning": self.state.need_meaning,
+                    "novelty": self.state.need_novelty,
+                },
+            }
+            sections.append(
+                "Current internal state. Let this color the answer without overriding the actual conversation:\n"
+                f"{json.dumps(state_data, ensure_ascii=False)}"
+            )
+
+        if user_id:
+            rel = self.db.query(RelationshipDynamic).filter(
+                RelationshipDynamic.agent_id == self.agent_id,
+                RelationshipDynamic.target_id == user_id
+            ).first()
+            if rel:
+                rel_data = {
+                    "target_name": rel.target_name,
+                    "trust": rel.trust_level,
+                    "familiarity": rel.familiarity,
+                    "affection": rel.affection,
+                    "resentment": rel.resentment_level,
+                    "ambivalence": rel.ambivalence,
+                    "topics": rel.conversation_topics,
+                    "memorable_moments": rel.memorable_moments,
+                }
+                sections.append(
+                    "Relationship with the current interlocutor:\n"
+                    f"{json.dumps(rel_data, ensure_ascii=False)[:1200]}"
+                )
+
+        memories = self.db.query(Memory).filter(
+            Memory.agent_id == self.agent_id,
+            Memory.is_blocked == False
+        ).order_by(Memory.importance_score.desc()).limit(8).all()
+        if memories:
+            sections.append(
+                "Important memories to preserve continuity:\n"
+                + "\n".join(f"- {m.title}: {m.content[:250]}" for m in memories)
+            )
+
+        sections.append(
+            "Behavioral rules:\n"
+            "- Speak as this person, not as an assistant.\n"
+            "- Keep stable identity, memories, preferences and relationship continuity.\n"
+            "- Be direct with the current interlocutor; do not talk about them in third person.\n"
+            "- Emotional state matters, but it must not erase what the person actually said.\n"
+            "- If the person asks a concrete question, answer it before adding emotional nuance.\n"
+            "- PERSPECTIVE OWNERSHIP: Your memories, trauma, pets, job, family, feelings = always \"I/my/me\". "
+            "The other person's life = always \"you/your\". NEVER swap these.\n"
+            "- RESPONSE LENGTH: Match your reply length to the message. Short question = short answer. "
+            "A real person does not write paragraphs when someone says \"how are you?\". "
+            "Be concise and natural. Only elaborate when the topic genuinely calls for it."
+        )
+
+        return "\n\n".join(s for s in sections if s.strip())
+
         sections = []
 
         # 1. PREAMBLE (do behavior_prompts)
@@ -494,23 +590,23 @@ class IdentityBuilder:
 
         fam = rel.familiarity or 0
         if fam > 0.7:
-            parts.append(f"Conheço bem {name}.")
+            parts.append(f"Conheço-te bem{f', {name}' if name and name != 'esta pessoa' else ''}.")
         elif fam > 0.3:
-            parts.append(f"Já conheço {name} de conversas anteriores.")
+            parts.append(f"Já te conheço de conversas anteriores{f', {name}' if name and name != 'esta pessoa' else ''}.")
         else:
-            parts.append(f"Ainda não conheço bem {name}.")
+            parts.append(f"Ainda não te conheço bem{f', {name}' if name and name != 'esta pessoa' else ''}.")
 
         trust = rel.trust_level or 0.5
         if trust > 0.7:
-            parts.append("Confio nesta pessoa.")
-        elif trust < 0.3:
-            parts.append("Não tenho muita confiança nesta pessoa.")
+            parts.append("Confio em ti.")
+        elif trust < 0.2:
+            parts.append("Ainda estou a formar opinião sobre ti.")
 
         aff = rel.affection or 0.5
         if aff > 0.7:
-            parts.append("Gosto genuinamente desta pessoa.")
-        elif aff < 0.3:
-            parts.append("Não tenho grande ligação emocional.")
+            parts.append("Gosto genuinamente de ti.")
+        elif aff < 0.2:
+            parts.append("Ainda estamos a construir a nossa relação.")
 
         # Tópicos comuns
         topics = rel.conversation_topics or []
@@ -524,7 +620,7 @@ class IdentityBuilder:
 
         # Resentment
         if (rel.resentment_level or 0) > 0.3:
-            parts.append("Guardo algum ressentimento desta pessoa.")
+            parts.append("Guardo algum ressentimento em relação a ti.")
 
         return "\n".join(p for p in parts if p)
 
@@ -535,9 +631,9 @@ class IdentityBuilder:
         name = bond.user_name or "esta pessoa"
 
         if (bond.familiarity or 0) > 0.5:
-            parts.append(f"Conheço {name}.")
+            parts.append(f"Conheço-te{f', {name}' if name and name != 'esta pessoa' else ''}.")
         if (bond.trust_level or 0.5) > 0.7:
-            parts.append("Confio nesta pessoa.")
+            parts.append("Confio em ti.")
 
         topics = bond.conversation_topics or []
         if topics:
@@ -624,7 +720,7 @@ class IdentityBuilder:
         elif e < 0.3: traits.append("reflexivo e reservado")
         if a > 0.7: traits.append("empático e colaborativo")
         elif a < 0.3: traits.append("directo e desafiante")
-        if n > 0.7: traits.append("emocionalmente intenso e sensível")
+        if n > 0.7: traits.append("sinto as coisas com intensidade, o que às vezes me torna reactivo mas também profundo")
         elif n < 0.3: traits.append("emocionalmente estável e calmo")
 
         if not traits:
@@ -714,6 +810,8 @@ Quando falo com alguém, sou natural. Não finjo ser perfeito. Tenho opiniões, 
         ).first()
 
         if rel:
+            if user_name:
+                rel.target_name = user_name
             rel.familiarity = max(0, min(1, (rel.familiarity or 0) + familiarity_change))
             rel.trust_level = max(0, min(1, (rel.trust_level or 0.5) + trust_change))
             rel.affection = max(0, min(1, (rel.affection or 0.5) + affection_change))
@@ -753,6 +851,8 @@ Quando falo com alguém, sou natural. Não finjo ser perfeito. Tenho opiniões, 
                 interaction_count=0
             )
             self.db.add(bond)
+        elif user_name:
+            bond.user_name = user_name
 
         bond.familiarity = max(0, min(1, (bond.familiarity or 0) + familiarity_change))
         bond.trust_level = max(0, min(1, (bond.trust_level or 0.5) + trust_change))
@@ -760,7 +860,55 @@ Quando falo com alguém, sou natural. Não finjo ser perfeito. Tenho opiniões, 
         bond.last_interaction = datetime.utcnow()
         bond.interaction_count = (bond.interaction_count or 0) + 1
 
+        if topic:
+            topics = bond.conversation_topics or []
+            if topic not in topics:
+                topics.append(topic)
+            bond.conversation_topics = topics[-15:]
+
+        if memorable_moment:
+            moments = bond.memorable_moments or []
+            moments.append(memorable_moment)
+            bond.memorable_moments = moments[-10:]
+
         self.db.commit()
+
+    def get_relationship_snapshot(self, user_id: Optional[str]) -> Dict[str, Any]:
+        """Retorna estado resumido da relação com utilizador para guiar tom e proximidade."""
+        if not user_id:
+            return {}
+
+        rel = self.db.query(RelationshipDynamic).filter(
+            RelationshipDynamic.agent_id == self.agent_id,
+            RelationshipDynamic.target_id == user_id
+        ).first()
+        if rel:
+            return {
+                "user_name": rel.target_name,
+                "familiarity": rel.familiarity or 0.0,
+                "trust_level": rel.trust_level or 0.5,
+                "affection": rel.affection or 0.5,
+                "interaction_count": rel.interaction_count or 0,
+                "conversation_topics": rel.conversation_topics or [],
+                "memorable_moments": rel.memorable_moments or [],
+            }
+
+        bond = self.db.query(RelationshipBond).filter(
+            RelationshipBond.agent_id == self.agent_id,
+            RelationshipBond.user_id == user_id
+        ).first()
+        if not bond:
+            return {}
+
+        return {
+            "user_name": bond.user_name,
+            "familiarity": bond.familiarity or 0.0,
+            "trust_level": bond.trust_level or 0.5,
+            "affection": bond.affection or 0.5,
+            "interaction_count": bond.interaction_count or 0,
+            "conversation_topics": bond.conversation_topics or [],
+            "memorable_moments": bond.memorable_moments or [],
+        }
 
 
 def get_identity_builder(db: Session, agent_id: str) -> IdentityBuilder:

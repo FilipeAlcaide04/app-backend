@@ -513,30 +513,13 @@ class PersonaEngine:
 
     def _create_initial_memories(self, persona_data: Dict):
         """Cria memórias iniciais do memory_config na tabela Memory"""
-        from uuid import uuid4
+        from agent_system.memory_manager_cognitive import MemoryManager
 
         memories_config = persona_data.get("memory_config", {}).get("initial_memories", [])
         if not memories_config:
             return
 
-        # Obter ou criar memory types necessários
-        memory_type_map = {}
-        for mem in memories_config:
-            mt_name = mem.get("memory_type", "episodic")
-            if mt_name not in memory_type_map:
-                mt = self.db.query(MemoryType).filter(MemoryType.name == mt_name).first()
-                if not mt:
-                    mt = MemoryType(
-                        id=str(uuid4()),
-                        name=mt_name,
-                        description=f"Tipo de memória: {mt_name}",
-                        temporal_scope="permanent" if mt_name in ("semantic", "procedural") else "long_term",
-                        decay_rate=0.0 if mt_name == "semantic" else 0.01,
-                        activation_threshold=0.3
-                    )
-                    self.db.add(mt)
-                    self.db.flush()
-                memory_type_map[mt_name] = mt.id
+        memory_manager = MemoryManager(self.db, self.agent_id)
 
         for mem in memories_config:
             content = mem.get("content", "")
@@ -555,32 +538,42 @@ class PersonaEngine:
                 topics.extend(trauma.get("beliefs_formed", []))
                 topics.append(trauma.get("type", ""))
 
-            memory = Memory(
-                id=str(uuid4()),
-                agent_id=self.agent_id,
-                type_id=memory_type_map[mt_name],
+            memory = memory_manager.create_memory(
                 title=content[:100],
                 content=content,
+                memory_type=mt_name,
                 emotional_valence=valence,
                 importance_score=importance,
                 relates_to_topics=topics,
                 is_autobiographical=True,
             )
-            self.db.add(memory)
-            self.db.flush()
 
             # Se tem trauma, criar PersonaMemoryDetail
             if trauma:
-                detail = PersonaMemoryDetail(
-                    memory_id=memory.id,
-                    is_traumatic=True,
-                    trauma_type=trauma.get("type"),
-                    trauma_severity=trauma.get("severity", 0.5),
-                    processing_status=trauma.get("processing_status", "unprocessed"),
-                    triggers=[{"description": t, "intensity": 0.7} for t in trauma.get("triggers", [])],
-                    beliefs_formed=trauma.get("beliefs_formed", []),
-                )
-                self.db.add(detail)
+                existing_detail = self.db.query(PersonaMemoryDetail).filter(
+                    PersonaMemoryDetail.memory_id == memory.id
+                ).first()
+                if existing_detail:
+                    existing_detail.is_traumatic = True
+                    existing_detail.trauma_type = trauma.get("type")
+                    existing_detail.trauma_severity = trauma.get("severity", 0.5)
+                    existing_detail.processing_status = trauma.get("processing_status", "unprocessed")
+                    existing_detail.triggers = [
+                        {"description": t, "intensity": 0.7}
+                        for t in trauma.get("triggers", [])
+                    ]
+                    existing_detail.beliefs_formed = trauma.get("beliefs_formed", [])
+                else:
+                    detail = PersonaMemoryDetail(
+                        memory_id=memory.id,
+                        is_traumatic=True,
+                        trauma_type=trauma.get("type"),
+                        trauma_severity=trauma.get("severity", 0.5),
+                        processing_status=trauma.get("processing_status", "unprocessed"),
+                        triggers=[{"description": t, "intensity": 0.7} for t in trauma.get("triggers", [])],
+                        beliefs_formed=trauma.get("beliefs_formed", []),
+                    )
+                    self.db.add(detail)
 
         logger.debug(f"[persona] {len(memories_config)} memórias iniciais para {self.agent_id}")
 
@@ -789,10 +782,27 @@ class PersonaEngine:
                 stress_change += val * 0.35
 
         # Emoções positivas reduzem stress
-        for emo in ["joy", "love", "gratitude", "pride", "hope"]:
+        for emo in ["joy", "love", "gratitude", "pride", "hope", "trust"]:
             val = changes.get(emo, 0)
             if val > 0:
-                stress_change -= val * 0.15
+                stress_change -= val * 0.25
+
+        relief = changes.get("stress_relief", 0)
+        if relief > 0:
+            stress_change -= relief
+
+        # Interações benignas ou de aproximação ajudam a sair da crise aos poucos,
+        # mesmo que a persona ainda esteja triste/defensiva.
+        negative_load = sum(
+            max(0, changes.get(emo, 0))
+            for emo in ["anger", "fear", "sadness", "disgust", "shame", "guilt"]
+        )
+        positive_load = sum(
+            max(0, changes.get(emo, 0))
+            for emo in ["joy", "love", "gratitude", "pride", "hope", "trust"]
+        )
+        if negative_load == 0 and positive_load > 0:
+            stress_change -= min(0.08, positive_load * 0.2)
 
         self.state.current_stress_load = max(0, min(1.0,
             self.state.current_stress_load + stress_change))
@@ -989,11 +999,11 @@ class PersonaEngine:
         defenses = self.blueprint.personality_full.get("defense_mechanisms", {})
         stress = self.state.current_stress_load or 0
 
-        if stress > 0.7:
+        if stress > 0.75:
             return defenses.get("under_extreme_stress", ["dissociation"])
-        elif stress > 0.4:
+        elif stress > 0.5:
             return defenses.get("under_moderate_stress", ["denial"])
-        elif stress > 0.2:
+        elif stress > 0.4:
             return defenses.get("habitual", ["rationalization"])
 
         return []

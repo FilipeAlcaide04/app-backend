@@ -7,10 +7,13 @@ Simula um "cérebro" que aprende com as interações
 from sqlalchemy.orm import Session
 from data.schema_cognitive import Memory, MemoryType, Agent, MicroAgent, MicroAgentType, MemoryEmbedding
 from llm_logic.embedding_generator import EmbeddingGenerator
+from agent_system.prompt_manager import PromptManager
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
 import json
+import hashlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ class NeuralNetworkLayer:
         self.agent_id = agent_id
         self.embedding_generator = EmbeddingGenerator()
         self.agent = self._load_agent()
+        self.prompts = PromptManager(db)
         self._memory_cache = {}  # Cache de memórias para performance
     
     def _load_agent(self) -> Agent:
@@ -188,10 +192,18 @@ class NeuralNetworkLayer:
             Memory.is_blocked == False  # Ignorar memórias traumáticas bloqueadas
         ).all()
         
+        query_words = {
+            w for w in re.findall(r"\w+", (query or "").lower())
+            if len(w) >= 4
+        }
+
         # Calcular scores de relevância
         memory_scores = []
         
         for memory in all_memories:
+            if self._is_noisy_memory(memory):
+                continue
+
             # Score semântico (se houver embedding)
             semantic_score = 0.0
             
@@ -200,6 +212,15 @@ class NeuralNetworkLayer:
                     if emb.embedding:
                         similarity = self._cosine_similarity(query_embedding, emb.embedding)
                         semantic_score = max(semantic_score, similarity)
+
+            memory_text = " ".join([
+                memory.title or "",
+                memory.content or "",
+                " ".join(str(t) for t in (memory.relates_to_topics or [])),
+            ]).lower()
+            text_overlap = bool(query_words and any(w in memory_text for w in query_words))
+            if semantic_score < 0.16 and not text_overlap:
+                continue
             
             # Score de recência
             time_diff = (datetime.utcnow() - memory.created_at).days
@@ -234,6 +255,22 @@ class NeuralNetworkLayer:
         self.db.commit()
         
         return relevant_memories
+
+    def _is_noisy_memory(self, memory: Memory) -> bool:
+        topics = memory.relates_to_topics or []
+        if isinstance(topics, str):
+            topics = [topics]
+        topic_set = {str(t).lower() for t in topics}
+        title = (memory.title or "").lower()
+
+        if "imagined" in topic_set or "generated" in topic_set:
+            return "autobiographical_imagination" not in topic_set
+
+        return (
+            title.startswith("aprendizado:")
+            or title.startswith("learning:")
+            or "learning" in topic_set
+        )
     
     def _get_recent_memories(self, limit: int = 5) -> List[Memory]:
         """Obtém memórias recentes como fallback"""
@@ -251,7 +288,7 @@ class NeuralNetworkLayer:
         response: str,
         confidence: float,
         user_context: Optional[Dict] = None
-    ) -> Memory:
+    ) -> Optional[Memory]:
         """
         Cria memória de aprendizado baseado em interação
         Permite ao sistema evoluir com experiência
@@ -261,39 +298,47 @@ class NeuralNetworkLayer:
         
         memory_manager = MemoryManager(self.db, self.agent_id)
         
+        # Evitar guardar interações triviais (ruído)
+        if self._is_trivial_interaction(query):
+            return None
+
+        topic = self._extract_query_topic(query)
+        signature = self._learning_signature(interaction_type, query)
+
         # Determinar tipo de memória
         if success and confidence > 0.8:
             memory_type = "semantic"  # Conhecimento bem estabelecido
             importance = 0.8
         elif success:
             memory_type = "episodic"
-            importance = 0.6
+            importance = 0.55
         else:
             memory_type = "semantic"  # Aprender com falhas também
-            importance = 0.5
+            importance = 0.65
         
         # Criar título descritivo
         memory_title = f"Aprendizado: {interaction_type} ({'sucesso' if success else 'desafio'})"
         
         # Criar conteúdo
-        memory_content = f"""
-Tipo de interação: {interaction_type}
-Resultado: {'✓ Sucesso' if success else '✗ Desafio'}
-Confiança: {confidence:.1%}
+        memory_content = (
+            f"Assunto: {topic}\n"
+            f"Resultado: {'sucesso' if success else 'desafio'}\n"
+            f"Confiança: {confidence:.1%}\n"
+            f"Lição: {'abordagem funcionou para este tipo de interação' if success else 'é preciso rever abordagem para este tipo de interação'}\n"
+            f"Contexto: {json.dumps(user_context or {}, ensure_ascii=False)}\n"
+            f"Signature: {signature}"
+        )
 
-Query do utilizador:
-{query}
-
-Resposta fornecida:
-{response}
-
-Contexto adicional:
-{json.dumps(user_context or {}, indent=2)}
-
-Lições aprendidas:
-- Sistema de pensamento paralelo provou ser {'efetivo' if success else 'insuficiente'}
-- Confiança final: {confidence:.1%}
-"""
+        # Evitar duplicação recente da mesma aprendizagem
+        duplicate = self.db.query(Memory).filter(
+            Memory.agent_id == self.agent_id,
+            Memory.title == memory_title,
+            Memory.content.like(f"%Signature: {signature}%"),
+            Memory.created_at >= datetime.utcnow() - timedelta(days=7),
+            Memory.is_blocked == False,
+        ).first()
+        if duplicate:
+            return duplicate
         
         # Valência emocional
         emotional_valence = 0.5 if success else -0.3
@@ -305,10 +350,45 @@ Lições aprendidas:
             memory_type=memory_type,
             importance_score=importance,
             emotional_valence=emotional_valence,
-            relates_to_topics=["learning", "interaction", interaction_type]
+            relates_to_topics=["learning", "interaction", interaction_type, topic]
         )
-        
+
         return memory
+
+    def _is_trivial_interaction(self, query: str) -> bool:
+        text = (query or "").strip()
+        if len(text) < 6:
+            return True
+        try:
+            from llm_logic.llm_client import LLMClient
+            prompt = self.prompts.render(
+                "learning.should_store_interaction",
+                message=text[:1000],
+            )
+            raw = LLMClient().generate(prompt, max_tokens=120, temperature=0.1).strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+            if "should_store" in parsed:
+                return not bool(parsed.get("should_store"))
+        except Exception as e:
+            logger.debug(f"[learning] filtro semântico falhou: {e}")
+        return False
+
+    def _extract_query_topic(self, query: str) -> str:
+        words = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (query or "").lower())
+        significant = [w for w in words if len(w) >= 4][:6]
+        if not significant:
+            return "geral"
+        return " ".join(significant)
+
+    def _learning_signature(self, interaction_type: str, query: str) -> str:
+        normalized = " ".join(re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (query or "").lower()))
+        raw = f"{interaction_type}:{normalized[:220]}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     
     def adjust_micro_agent_weights(
         self,

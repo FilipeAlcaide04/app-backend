@@ -29,74 +29,12 @@ class AgentServiceCognitive:
     def _ensure_default_micro_agent_types(self):
         """Cria tipos de micro-agentes padrão se não existirem"""
         
-        default_types = [
-            {
-                "name": "logical",
-                "category": "thinking_type",
-                "description": "Pensamento racional e análise lógica",
-                "system_prompt": "Você é um micro-agente focado em análise lógica. Analise o problema com rigor matemático e racional.",
-                "cognitive_objective": "Alcançar conclusões racionalmente fundamentadas",
-                "thinking_framework": "Dedução lógica, análise sistemática",
-                "default_weight": 1.2,
-                "response_style": "analytical",
-                "is_builtin": True,
-            },
-            {
-                "name": "emotional",
-                "category": "thinking_type",
-                "description": "Processamento emocional e empatia",
-                "system_prompt": "Você é um micro-agente focado em processar dimensões emocionais. Considere sentimentos e relações humanas.",
-                "cognitive_objective": "Considerar bem-estar e valores emocionais",
-                "thinking_framework": "Empatia, compreensão emocional",
-                "default_weight": 1.0,
-                "response_style": "empathetic",
-                "is_builtin": True,
-            },
-            {
-                "name": "critical",
-                "category": "thinking_type",
-                "description": "Pensamento crítico e questionamento",
-                "system_prompt": "Você é um micro-agente crítico. Questione premissas, procure por falhas, desafie conclusões óbvias.",
-                "cognitive_objective": "Identificar fraquezas e riscos",
-                "thinking_framework": "Pensamento crítico, análise de premissas",
-                "default_weight": 1.1,
-                "response_style": "questioning",
-                "is_builtin": True,
-            },
-            {
-                "name": "creative",
-                "category": "thinking_type",
-                "description": "Pensamento criativo e inovador",
-                "system_prompt": "Você é um micro-agente criativo. Procure soluções inovadoras, conexões não-óbvias, ideias fora da caixa.",
-                "cognitive_objective": "Gerar novas perspectivas e ideias",
-                "thinking_framework": "Pensamento divergente, criatividade",
-                "default_weight": 0.9,
-                "response_style": "innovative",
-                "is_builtin": True,
-            },
-            {
-                "name": "ethical",
-                "category": "thinking_type",
-                "description": "Considerações éticas e morais",
-                "system_prompt": "Você é um micro-agente ético. Avalie implicações morais e éticas. Considere valores e princípios.",
-                "cognitive_objective": "Garantir alinhamento ético",
-                "thinking_framework": "Ética, valores, justiça",
-                "default_weight": 1.1,
-                "response_style": "principled",
-                "is_builtin": True,
-            },
-            {
-                "name": "social",
-                "category": "thinking_type",
-                "description": "Dinâmica social e interpessoal",
-                "system_prompt": "Você é um micro-agente social. Considere dinâmica de grupo, relações sociais, impacto nas pessoas.",
-                "cognitive_objective": "Compreender e navegar dinâmicas sociais",
-                "thinking_framework": "Inteligência social, empatia",
-                "default_weight": 1.0,
-                "response_style": "diplomatic",
-                "is_builtin": True,
-            },
-        ]
+        try:
+            from data.database.setup import MICRO_AGENT_TYPES
+            default_types = MICRO_AGENT_TYPES
+        except Exception as e:
+            logger.warning(f"Não foi possível carregar micro-agent types do setup: {e}")
+            return
         
         for type_data in default_types:
             existing = self.db.query(MicroAgentType).filter(
@@ -127,6 +65,7 @@ class AgentServiceCognitive:
         avatar: str = "👤",
         micro_agents_config: Optional[Dict] = None,
         owner_id: Optional[str] = None,
+        language: str = "pt-PT",
     ) -> Agent:
         """
         Cria novo agente (pessoa artificial)
@@ -157,6 +96,7 @@ class AgentServiceCognitive:
             base_values=base_values or {},
             background_story=background_story,
             life_experiences=life_experiences or {},
+            language=language,
             thinking_style=thinking_style,
             decision_making_approach=decision_making_approach,
             debate_intensity=debate_intensity,
@@ -202,8 +142,7 @@ class AgentServiceCognitive:
                 }
         """
         
-        # SEMPRE usar os 6 tipos padrão
-        default_types = ["logical", "emotional", "critical", "creative", "ethical", "social"]
+        default_types = ["logical", "emotional", "critical", "creative", "ethical", "social", "memory_curator", "imagination"]
         types_to_create = types or default_types
         
         config = config or {}
@@ -254,8 +193,8 @@ class AgentServiceCognitive:
     # ========== OBTER AGENTE ==========
     
     def get_agent(self, agent_id: str) -> Optional[Agent]:
-        """Obtém agente por ID"""
-        return self.db.query(Agent).filter(Agent.id == agent_id).first()
+        """Obtém agente por ID (exclui apagados)"""
+        return self.db.query(Agent).filter(Agent.id == agent_id, Agent.deleted_at == None).first()
     
     def get_agent_by_name(self, name: str) -> Optional[Agent]:
         """Obtém agente por nome"""
@@ -270,7 +209,7 @@ class AgentServiceCognitive:
     ) -> List[Agent]:
         """Lista agentes. Se owner_id for passado, filtra apenas os do utilizador."""
 
-        query = self.db.query(Agent)
+        query = self.db.query(Agent).filter(Agent.deleted_at == None)
 
         if active_only:
             query = query.filter(Agent.is_active == True)
@@ -295,7 +234,7 @@ class AgentServiceCognitive:
         
         # Permitir atualização de campos específicos
         allowed_fields = {
-            'name', 'description', 'avatar', 'personality_traits',
+            'name', 'description', 'avatar', 'language', 'personality_traits',
             'base_values', 'background_story', 'life_experiences',
             'thinking_style', 'decision_making_approach', 'debate_intensity',
             'current_emotional_state', 'is_active'
@@ -464,9 +403,11 @@ class AgentServiceCognitive:
         return {
             "id": memory.id,
             "title": memory.title,
+            "content": memory.content,
             "type": memory.type.name if memory.type else "unknown",
             "importance": memory.importance_score,
             "emotional_valence": memory.emotional_valence,
+            "is_blocked": memory.is_blocked,
             "created_at": memory.created_at.isoformat() if memory.created_at else None,
             "accessed_at": memory.last_accessed.isoformat() if memory.last_accessed else None,
         }
@@ -500,6 +441,7 @@ class AgentServiceCognitive:
             "background_story": agent.background_story,
             "personality_traits": agent.personality_traits,
             "base_values": agent.base_values,
+            "language": getattr(agent, "language", "pt-PT") or "pt-PT",
             "thinking_style": agent.thinking_style,
             "decision_making_approach": agent.decision_making_approach,
             "debate_intensity": agent.debate_intensity,

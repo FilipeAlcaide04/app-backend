@@ -11,6 +11,7 @@ from data.schema_cognitive import (
     ConversationSession, ConversationMessage, Agent, Memory, MemoryType
 )
 from agent_system.memory_manager_cognitive import MemoryManager
+from agent_system.prompt_manager import PromptManager
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -27,6 +28,10 @@ class ConversationManager:
     def __init__(self, db: Session, agent_id: str):
         self.db = db
         self.agent_id = agent_id
+        self.prompts = PromptManager(db)
+        from data.schema_cognitive import Agent
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        self.persona_name = agent.name if agent else "Persona"
 
     # ================================================================
     # SESSION MANAGEMENT
@@ -61,10 +66,11 @@ class ConversationManager:
             if age < 7200:  # 2 horas
                 return recent
 
-        # Fechar sessões antigas
+        # Fechar sessões antigas e gerar sumário + memórias
         if recent:
             recent.is_active = False
             recent.ended_at = datetime.utcnow()
+            self._close_and_summarize(recent)
 
         # Criar nova sessão
         session_id = conversation_id or str(uuid4())
@@ -147,7 +153,7 @@ class ConversationManager:
         self,
         session: ConversationSession,
         n_messages: int = 10
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """Obtém últimas N mensagens para contexto do LLM"""
 
         messages = self.db.query(ConversationMessage).filter(
@@ -158,7 +164,11 @@ class ConversationManager:
         messages.reverse()
 
         return [
-            {"role": msg.role, "content": msg.content}
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+            }
             for msg in messages
         ]
 
@@ -222,13 +232,15 @@ class ConversationManager:
         Constrói contexto completo da conversa para o LLM.
         Inclui: mensagens recentes, resumos de sessões anteriores, tópicos.
         """
+        current_messages = self.get_recent_context(session, n_messages=15)
 
         context = {
-            "current_messages": self.get_recent_context(session, n_messages=15),
+            "current_messages": current_messages,
             "current_topic": session.current_topic,
             "emotional_tone": session.emotional_tone,
             "message_count": session.message_count or 0,
             "session_duration": None,
+            "live_memory": self.build_live_conversation_memory(current_messages),
         }
 
         if session.started_at:
@@ -258,6 +270,51 @@ class ConversationManager:
             context["previous_sessions"] = summaries
 
         return context
+
+    def build_live_conversation_memory(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Cria uma memória viva da conversa recente.
+        Não tenta decidir por palavras fixas; pede ao LLM para interpretar a thread,
+        promessas, perguntas pendentes e continuidade conversacional.
+        """
+
+        if not messages:
+            return {}
+
+        recent = messages[-12:]
+        transcript = "\n".join(
+            f"{self.persona_name if m.get('role') == 'assistant' else 'Utilizador'} [{m.get('timestamp') or '?'}]: {(m.get('content') or '').strip()[:700]}"
+            for m in recent
+            if (m.get("content") or "").strip()
+        )
+        if not transcript:
+            return {}
+
+        prompt = self.prompts.render("conversation.live_memory", transcript=transcript)
+
+        try:
+            from llm_logic.llm_client import LLMClient
+            raw = LLMClient().generate(prompt, max_tokens=450, temperature=0.2).strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as e:
+            logger.debug(f"[conversation-memory] falha ao resumir thread: {e}")
+
+        return {
+            "summary": transcript[-1200:],
+            "current_topic": "",
+            "user_latest_intent": "",
+            "assistant_recent_commitment": "",
+            "pending_user_question": "",
+            "should_continue_previous_thread": False,
+            "continuity_guidance": "",
+        }
 
     def update_session_metadata(
         self,
@@ -376,60 +433,92 @@ class ConversationManager:
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
         return [w[0] for w in sorted_words[:5]]
 
+    def _close_and_summarize(self, session: ConversationSession):
+        """Closes a session with LLM summary and generates long-term memories."""
+        try:
+            if not session.message_count or session.message_count < 2:
+                return
+            messages = self.get_conversation_history(session.id, limit=60)
+            if not messages:
+                return
+            summary = self._summarize_conversation(messages)
+            if summary:
+                session.summary = summary
+            memory_mgr = MemoryManager(self.db, self.agent_id)
+            self.generate_session_memories(session, memory_mgr)
+            self.db.commit()
+        except Exception as e:
+            logger.debug(f"[session] Erro ao fechar sessão com sumário: {e}")
+
     def _summarize_conversation(self, messages: List[Dict]) -> str:
-        """Gera resumo simples da conversa"""
+        """Gera resumo da conversa via LLM — captura factos, emoções, promessas e estado relacional."""
+        if not messages or len(messages) < 2:
+            return ""
 
-        user_msgs = [m["content"][:100] for m in messages if m["role"] == "user"]
-        agent_msgs = [m["content"][:100] for m in messages if m["role"] == "assistant"]
+        transcript = "\n".join(
+            f"{'Utilizador' if m.get('role') == 'user' else self.persona_name}: {(m.get('content') or '')[:300]}"
+            for m in messages[-20:]
+        )
 
-        summary_parts = []
+        prompt = self.prompts.render("conversation.summary", transcript=transcript)
 
-        if user_msgs:
-            summary_parts.append(f"O utilizador falou sobre: {'; '.join(user_msgs[:3])}")
-
-        if agent_msgs:
-            summary_parts.append(f"Eu respondi sobre: {'; '.join(agent_msgs[:2])}")
-
-        summary_parts.append(f"Total de {len(messages)} mensagens.")
-
-        return " ".join(summary_parts)
+        try:
+            from llm_logic.llm_client import LLMClient
+            result = LLMClient().generate(prompt, max_tokens=250, temperature=0.3)
+            return (result or "").strip()
+        except Exception as e:
+            logger.debug(f"[summarize] LLM fallback: {e}")
+            user_msgs = [m["content"][:80] for m in messages if m["role"] == "user"][:3]
+            return f"Conversa sobre: {'; '.join(user_msgs)}. {len(messages)} mensagens."
 
     def _extract_personal_info(self, messages: List[Dict]) -> str:
-        """Extrai informação pessoal partilhada pelo utilizador"""
+        """Extrai informação pessoal partilhada pelo utilizador via LLM."""
+        if not messages:
+            return ""
 
-        personal_patterns = [
-            r"(?:eu sou|sou|trabalho como|moro em|vivo em|tenho \d+|chamo.me)\s+(.+?)[\.\,\!]",
-            r"(?:meu nome|me chamo|gosto de|prefiro|detesto|adoro)\s+(.+?)[\.\,\!]",
-            r"(?:a minha|o meu|na minha)\s+(.+?)[\.\,\!]",
-        ]
+        user_text = "\n".join(
+            (m.get("content") or "")[:200]
+            for m in messages if m.get("role") == "user"
+        )
+        if len(user_text) < 15:
+            return ""
 
-        info_parts = []
-        for msg in messages:
-            text = msg.get("content", "")
-            for pattern in personal_patterns:
-                matches = re.findall(pattern, text.lower())
-                info_parts.extend(matches)
+        prompt = self.prompts.render("conversation.personal_info", user_text=user_text[:1500])
 
-        if info_parts:
-            return "Informação partilhada: " + "; ".join(set(info_parts[:5]))
-
+        try:
+            from llm_logic.llm_client import LLMClient
+            result = LLMClient().generate(prompt, max_tokens=150, temperature=0.2)
+            result = (result or "").strip()
+            if result and result.upper() not in {"NONE", "NADA"}:
+                return result
+        except Exception:
+            pass
         return ""
 
     def _estimate_valence(self, messages: List[Dict]) -> float:
-        """Estima valência emocional da conversa"""
-
-        positive = ["obrigado", "gosto", "adoro", "excelente", "ótimo", "bom", "fixe", "incrível", "fantástico"]
-        negative = ["mau", "péssimo", "odeio", "horrível", "triste", "raiva", "frustrado", "chateado"]
-
-        text = " ".join(m.get("content", "") for m in messages).lower()
-
-        pos = sum(1 for w in positive if w in text)
-        neg = sum(1 for w in negative if w in text)
-
-        if pos + neg == 0:
+        """Estima valência emocional semanticamente, sem contagem de palavras."""
+        transcript = "\n".join(
+            f"{m.get('role', '?')}: {(m.get('content') or '')[:300]}"
+            for m in messages[-30:]
+        )
+        if not transcript.strip():
             return 0.0
 
-        return (pos - neg) / (pos + neg)
+        prompt = self.prompts.render("conversation.valence", transcript=transcript)
+        try:
+            from llm_logic.llm_client import LLMClient
+            raw = LLMClient().generate(prompt, max_tokens=120, temperature=0.1).strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+            valence = parsed.get("valence", 0.0)
+            return max(-1.0, min(1.0, float(valence))) if isinstance(valence, (int, float)) else 0.0
+        except Exception as e:
+            logger.debug(f"[valence] análise semântica falhou: {e}")
+            return 0.0
 
     # ================================================================
     # LAST STATE RESTORATION

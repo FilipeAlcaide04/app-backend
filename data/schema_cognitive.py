@@ -44,6 +44,7 @@ class Agent(Base):
     life_experiences = Column(JSON, default=dict)  # Experiências marcantes
     
     # Configurações cognitivas
+    language = Column(String(10), default="pt-PT")
     thinking_style = Column(String(50), default="balanced")  # logical, emotional, creative, balanced, etc
     decision_making_approach = Column(String(50), default="collaborative")  # how micro-agents decide
     debate_intensity = Column(Float, default=0.7)  # How much debate between micro-agents
@@ -108,6 +109,28 @@ class MicroAgentType(Base):
     
     __table_args__ = (
         Index('idx_microagenttype_category', 'category'),
+    )
+
+
+class PromptTemplate(Base):
+    """Prompts versionadas e editáveis em base de dados."""
+    __tablename__ = "prompt_templates"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    key = Column(String(150), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    category = Column(String(80), nullable=False, index=True)
+    description = Column(Text)
+    template = Column(Text, nullable=False)
+    language = Column(String(10), default="pt-PT")
+    version = Column(Integer, default=1)
+    variables = Column(JSON, default=list)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('idx_prompt_template_category', 'category'),
     )
 
 
@@ -337,6 +360,7 @@ class ThoughtProcess(Base):
     
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     agent_id = Column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(String(36), ForeignKey("conversation_sessions.id", ondelete="SET NULL"), index=True)
     
     # Input
     query = Column(Text, nullable=False)
