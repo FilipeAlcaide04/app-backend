@@ -13,7 +13,7 @@ Responsável por:
 from sqlalchemy.orm import Session
 from data.schema_cognitive import Agent, Memory, ThoughtProcess
 from data.schema_persona import PersonaBlueprint, DynamicState, InnerMonologue
-from llm_logic.llm_client import LLMClient
+from llm_logic.llm_client import get_llm_client
 from agent_system.memory_manager_cognitive import MemoryManager
 from agent_system.identity_builder import IdentityBuilder
 from agent_system.persona_engine import PersonaEngine
@@ -37,7 +37,7 @@ class CoreAgent:
         self.db = db
         self.agent_id = agent_id
         self.agent = self._load_agent()
-        self.llm_client = LLMClient()
+        self.llm_client = get_llm_client()
         self.memory_manager = MemoryManager(db, agent_id)
         self.identity = IdentityBuilder(db, agent_id)
         self.persona = PersonaEngine(db, agent_id)

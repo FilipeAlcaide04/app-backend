@@ -360,12 +360,12 @@ class NeuralNetworkLayer:
         if len(text) < 6:
             return True
         try:
-            from llm_logic.llm_client import LLMClient
+            from llm_logic.llm_client import get_llm_client
             prompt = self.prompts.render(
                 "learning.should_store_interaction",
                 message=text[:1000],
             )
-            raw = LLMClient().generate(prompt, max_tokens=120, temperature=0.1).strip()
+            raw = get_llm_client().generate(prompt, max_tokens=120, temperature=0.1).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:

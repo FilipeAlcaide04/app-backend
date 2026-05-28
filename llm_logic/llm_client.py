@@ -14,66 +14,76 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """Cliente LLM para Ollama"""
+    """Cliente LLM para Ollama (local ou cloud)"""
 
     def __init__(self):
+        self.is_cloud = settings.ollama_cloud_enabled
+
+        if self.is_cloud:
+            self._init_cloud()
+        else:
+            self._init_local()
+
+    def _init_cloud(self):
+        self.provider = "ollama-cloud"
+        cloud_api_key = settings.ollama_cloud_api_key
+        if not cloud_api_key:
+            raise ValueError("OLLAMA_CLOUD_API_KEY é obrigatória quando OLLAMA_CLOUD_ENABLED=true")
+
+        self.model = settings.ollama_cloud_model or settings.llm_model or "llama3"
+        self.client = OpenAI(
+            base_url="https://ollama.com/v1",
+            api_key=cloud_api_key
+        )
+        logger.info(f"LLM Cloud inicializado: modelo={self.model}")
+
+    def _init_local(self):
         self.provider = "ollama"
 
-        # Configuração do Ollama
         ollama_base_url = settings.ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        # Se não tem http/https, adiciona
+
         if not ollama_base_url.startswith("http"):
             ollama_base_url = "http://" + ollama_base_url
-        
-        # Remove trailing slash
+
         ollama_base_url = ollama_base_url.rstrip('/')
-        
-        # Guarda ambas as versões (com e sem /v1)
-        self.ollama_base_url = ollama_base_url  # http://localhost:11434
-        self.ollama_base_url_v1 = ollama_base_url + '/v1'  # http://localhost:11434/v1
-        
+
+        self.ollama_base_url = ollama_base_url
+        self.ollama_base_url_v1 = ollama_base_url + '/v1'
+
         ollama_api_key = settings.ollama_api_key or os.getenv("OLLAMA_API_KEY", "ollama")
-        
-        # Define modelo padrão
+
         default_model = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
         self.model = settings.llm_model or os.getenv("LLM_MODEL", default_model)
-        
-        # Usa endpoint compatível com OpenAI
+
+        logger.info(f"LLM Local inicializado: modelo={self.model} url={ollama_base_url}")
+
         try:
             self.client = OpenAI(
                 base_url=self.ollama_base_url_v1,
                 api_key=ollama_api_key
             )
         except Exception as e:
-            # Fallback para endpoint nativo do Ollama
             self.client = OpenAI(
                 base_url=self.ollama_base_url,
                 api_key=ollama_api_key
             )
 
-        # Query Ollama for available models and pick a compatible one if needed
         try:
-            # Tenta endpoint compatível com OpenAI primeiro
             models_endpoint = self.ollama_base_url_v1 + '/models'
             resp = requests.get(models_endpoint, timeout=3)
-            
-            # Se falhar, tenta endpoint nativo do Ollama
+
             if not resp.ok or resp.status_code == 404:
                 models_endpoint = self.ollama_base_url + '/api/tags'
                 resp = requests.get(models_endpoint, timeout=3)
-            
+
             if resp.ok:
                 data = resp.json()
                 models_list = []
-                
-                # Parse de endpoint /v1/models
+
                 if isinstance(data, dict) and 'data' in data:
                     for m in data['data']:
                         if isinstance(m, dict) and 'id' in m:
                             models_list.append(m['id'])
-                
-                # Parse de endpoint /api/tags (Ollama nativo)
                 elif isinstance(data, dict) and 'models' in data:
                     for m in data['models']:
                         if isinstance(m, dict) and 'name' in m:
@@ -125,7 +135,7 @@ class LLMClient:
             return response.choices[0].message.content
         except Exception as e:
             err_text = str(e).lower()
-            if "not found" in err_text or "404" in err_text:
+            if not self.is_cloud and ("not found" in err_text or "404" in err_text):
                 try:
                     fallback = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
                     if fallback and fallback != model_name:

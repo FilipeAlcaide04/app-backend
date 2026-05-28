@@ -497,7 +497,7 @@ async def get_greeting(
     from agent_system.memory_manager_cognitive import MemoryManager
     from agent_system.conversation_manager import ConversationManager
     from agent_system.prompt_manager import PromptManager
-    from llm_logic.llm_client import LLMClient
+    from llm_logic.llm_client import get_llm_client
 
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
@@ -565,7 +565,7 @@ async def get_greeting(
     )
 
     try:
-        llm = LLMClient()
+        llm = get_llm_client()
         raw = llm.generate(prompt, max_tokens=180, temperature=0.85).strip()
         try:
             parsed = json.loads(raw)

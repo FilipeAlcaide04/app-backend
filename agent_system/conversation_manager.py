@@ -293,8 +293,8 @@ class ConversationManager:
         prompt = self.prompts.render("conversation.live_memory", transcript=transcript)
 
         try:
-            from llm_logic.llm_client import LLMClient
-            raw = LLMClient().generate(prompt, max_tokens=450, temperature=0.2).strip()
+            from llm_logic.llm_client import get_llm_client
+            raw = get_llm_client().generate(prompt, max_tokens=450, temperature=0.2).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
@@ -463,8 +463,8 @@ class ConversationManager:
         prompt = self.prompts.render("conversation.summary", transcript=transcript)
 
         try:
-            from llm_logic.llm_client import LLMClient
-            result = LLMClient().generate(prompt, max_tokens=250, temperature=0.3)
+            from llm_logic.llm_client import get_llm_client
+            result = get_llm_client().generate(prompt, max_tokens=250, temperature=0.3)
             return (result or "").strip()
         except Exception as e:
             logger.debug(f"[summarize] LLM fallback: {e}")
@@ -486,8 +486,8 @@ class ConversationManager:
         prompt = self.prompts.render("conversation.personal_info", user_text=user_text[:1500])
 
         try:
-            from llm_logic.llm_client import LLMClient
-            result = LLMClient().generate(prompt, max_tokens=150, temperature=0.2)
+            from llm_logic.llm_client import get_llm_client
+            result = get_llm_client().generate(prompt, max_tokens=150, temperature=0.2)
             result = (result or "").strip()
             if result and result.upper() not in {"NONE", "NADA"}:
                 return result
@@ -506,8 +506,8 @@ class ConversationManager:
 
         prompt = self.prompts.render("conversation.valence", transcript=transcript)
         try:
-            from llm_logic.llm_client import LLMClient
-            raw = LLMClient().generate(prompt, max_tokens=120, temperature=0.1).strip()
+            from llm_logic.llm_client import get_llm_client
+            raw = get_llm_client().generate(prompt, max_tokens=120, temperature=0.1).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:

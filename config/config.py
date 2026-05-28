@@ -6,12 +6,17 @@ class Settings(BaseSettings):
     database_url: str
     secret_key: str = "dev-secret-key-change-in-production"
 
-    # Configurações Ollama
+    # Configurações Ollama (local)
     llm_provider: str = "ollama"
     llm_model: str = "llama2"
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str = "ollama"
     ollama_model: str = "llama2"
+
+    # Configurações Ollama Cloud
+    ollama_cloud_enabled: bool = False
+    ollama_cloud_model: str = ""
+    ollama_cloud_api_key: str = ""
 
     class Config:
         env_file = ".env"

@@ -137,75 +137,142 @@ class CognitiveOrchestrator:
     ) -> Dict[str, Any]:
         """
         Processo de pensamento cognitivo COMPLETO com persona.
+        Pipeline optimizado com fases paralelas onde possível.
         """
 
         logger.info(f"[think] agente={self.agent_id} query=\"{query[:60]}...\"")
         context = context or {}
         start_time = datetime.utcnow()
         context["latest_user_query"] = query
+        loop = asyncio.get_event_loop()
 
-        # === FASE 0: CONTEXTO DE CONVERSA ===
-        # Obter sessão de conversa e contexto de sessões anteriores
+        # === FASE 0: CONTEXTO DE CONVERSA (rápido, só DB) ===
         session = self.conversations.get_or_create_session(
             conversation_id=conversation_id,
             user_id=user_id or "default_user"
         )
-
-        # Adicionar mensagem do user à sessão
         self.conversations.add_message(session, "user", query)
 
-        # Carregar contexto de conversa
-        conv_context = self.conversations.build_conversation_context(session)
-        context["conversation_history"] = conv_context.get("current_messages", [])
-        context["previous_sessions"] = conv_context.get("previous_sessions", [])
-        context["conversation_memory"] = conv_context.get("live_memory", {})
-        context["conversation_thread"] = self._build_conversation_thread(context["conversation_history"])
+        # Carregar mensagens e sessões anteriores (DB only, rápido)
+        current_messages = self.conversations.get_recent_context(session, n_messages=15)
+        context["conversation_history"] = current_messages
+        context["conversation_thread"] = self._build_conversation_thread(current_messages)
 
-        # Estado da última sessão (para continuidade emocional)
         last_state = self.conversations.get_last_session_state(user_id or "default_user")
         if last_state:
             context["last_session"] = last_state
 
-        # === FASE 1: RELEVÂNCIA ===
-        relevance_scores = self.relevance_evaluator.evaluate_all_micro_agents(query, context)
-        relevant_agents = {
-            k: v for k, v in relevance_scores.items() if v.get("should_execute")
-        }
+        # Sessões anteriores (DB only)
+        from data.schema_cognitive import ConversationSession
+        previous = self.db.query(ConversationSession).filter(
+            ConversationSession.agent_id == self.agent_id,
+            ConversationSession.user_id == session.user_id,
+            ConversationSession.id != session.id,
+            ConversationSession.is_active == False
+        ).order_by(ConversationSession.ended_at.desc()).limit(3).all()
+        context["previous_sessions"] = [
+            {"date": p.ended_at.isoformat() if p.ended_at else "?",
+             "summary": p.summary, "topic": p.current_topic,
+             "tone": p.emotional_tone, "messages": p.message_count or 0}
+            for p in previous if p.summary
+        ]
 
+        # Identidade e estado (rápido, só leitura)
+        context["agent_identity"] = self.get_agent_identity()
+        if user_id:
+            context["relationship_snapshot"] = self.identity.get_relationship_snapshot(user_id)
+            context["user_id"] = user_id
+
+        # ============================================================
+        # BLOCO PARALELO 1: Live Memory (LLM) + Relevância (embeddings) + Documentos (embeddings) + Emocional (LLM)
+        # Todas independentes entre si neste ponto
+        # ============================================================
+        logger.info(f"[PARALELO 1] Lançando: live_memory + relevância + documentos + emocional")
+
+        async def _live_memory():
+            return await loop.run_in_executor(
+                None, self.conversations.build_live_conversation_memory, current_messages
+            )
+
+        async def _relevance():
+            return await loop.run_in_executor(
+                None, self.relevance_evaluator.evaluate_all_micro_agents, query, context
+            )
+
+        async def _documents():
+            if not self.document_awareness.should_consult_documents(query):
+                return {}
+            return await loop.run_in_executor(
+                None, self.document_awareness.get_document_context_for_agent, query
+            )
+
+        async def _emotional():
+            return await loop.run_in_executor(
+                None, self.emotions.process_interaction, query, "", user_id
+            )
+
+        live_mem_task = asyncio.create_task(_live_memory())
+        relevance_task = asyncio.create_task(_relevance())
+        documents_task = asyncio.create_task(_documents())
+        emotional_task = asyncio.create_task(_emotional())
+
+        conversation_memory, relevance_scores, doc_context, emotional_reaction = await asyncio.gather(
+            live_mem_task, relevance_task, documents_task, emotional_task
+        )
+
+        # Processar resultados do bloco paralelo 1
+        context["conversation_memory"] = conversation_memory or {}
+
+        # Relevância
+        relevant_agents = {k: v for k, v in relevance_scores.items() if v.get("should_execute")}
         logger.info(f"[FASE 1] RELEVÂNCIA: Avaliando {len(self.micro_agents)} micro-agentes")
-        for agent_name, score_info in relevance_scores.items():
-            logger.debug(f"  • {agent_name}: score={score_info.get('score', 0):.2f}, relevante={score_info.get('should_execute', False)}, razão={score_info.get('reason', 'N/A')}")
-
         if not relevant_agents:
             relevant_agents = self.micro_agents
-            logger.debug(f"[FASE 1] Nenhum agente específico relevante. Usando todos: {list(self.micro_agents.keys())}")
         else:
-            self.micro_agents = {
-                k: v for k, v in self.micro_agents.items() if k in relevant_agents
-            }
-            logger.info(f"[FASE 1] ✓ Selecionados {len(self.micro_agents)} agentes para pensar: {list(self.micro_agents.keys())}")
+            self.micro_agents = {k: v for k, v in self.micro_agents.items() if k in relevant_agents}
+        logger.info(f"[FASE 1] ✓ Selecionados {len(self.micro_agents)} agentes: {list(self.micro_agents.keys())}")
 
-        # === FASE 2: DOCUMENTOS ===
-        doc_context = {}
-        if self.document_awareness.should_consult_documents(query):
-            logger.info(f"[FASE 2] DOCUMENTOS: Consultando base de documentos...")
-            doc_context = self.document_awareness.get_document_context_for_agent(query)
-            if doc_context.get("has_documents"):
-                context["documents"] = doc_context
-                logger.info(f"[FASE 2] ✓ Documentos encontrados: {doc_context.get('document_count', 0)} docs, relevância={doc_context.get('relevance_score', 0):.2f}")
-                logger.debug(f"[FASE 2]   Contexto: {doc_context.get('context_text', '')[:200]}...")
-            else:
-                logger.debug(f"[FASE 2] Nenhum documento relevante encontrado")
-        else:
-            logger.debug(f"[FASE 2] DOCUMENTOS: Não necessário consultar documentos para esta pergunta")
+        # Documentos
+        if doc_context.get("has_documents"):
+            context["documents"] = doc_context
+            context["documents_context"] = doc_context.get("context_text", "")
+            logger.info(f"[FASE 2] ✓ Documentos: {doc_context.get('document_count', 0)} encontrados")
 
-        # === FASE 3: MEMÓRIAS ===
+        # Emocional
+        emotional_context = self.emotions.get_emotional_context_for_prompt(
+            response_modifier=emotional_reaction.get("response_modifier")
+        )
+        context["emotional_context"] = emotional_context
+        context["emotional_modifiers"] = self.emotions.get_emotional_modifiers()
+        context["emotional_reaction"] = emotional_reaction
+        logger.info(f"[FASE 4] EMOCIONAL: {emotional_reaction.get('emotional_reaction', 'neutro')} "
+                     f"({emotional_reaction.get('intensity', 0):.0%}), humor={emotional_reaction.get('current_mood', 'N/A')}")
+
+        # ============================================================
+        # BLOCO PARALELO 2: Memory Awareness (LLM) + Neural Modifiers (embeddings)
+        # Memory awareness precisa do conversation_memory que já temos
+        # ============================================================
+        logger.info(f"[PARALELO 2] Lançando: memory_awareness + rede_neural")
+
         conversation_memory_text = json.dumps(context.get("conversation_memory", {}), ensure_ascii=False)
         memory_query = f"{conversation_memory_text}\n{context.get('conversation_thread', '')}\n{query}".strip()
-        memory_awareness = self.memory_manager.build_memory_awareness(
-            query=query,
-            conversation_context=memory_query,
-        )
+
+        async def _memory_awareness():
+            return await loop.run_in_executor(
+                None, self.memory_manager.build_memory_awareness, query, memory_query
+            )
+
+        async def _neural_modifiers():
+            return await loop.run_in_executor(
+                None, self.neural_network.get_micro_agent_modifiers, query, context
+            )
+
+        memory_task = asyncio.create_task(_memory_awareness())
+        neural_task = asyncio.create_task(_neural_modifiers())
+
+        memory_awareness, neural_modifiers = await asyncio.gather(memory_task, neural_task)
+
+        # Processar memórias
         memories = memory_awareness.get("memories", [])
         context["memory"] = [
             {
@@ -219,57 +286,13 @@ class CognitiveOrchestrator:
         context["existing_memories"] = context["memory"]
         context["memory_awareness"] = memory_awareness.get("summary", "")
 
-        logger.info(
-            f"[FASE 3] MEMÓRIAS: Recuperadas {len(memories)} memórias relevantes "
-            f"({memory_awareness.get('total_considered', len(memories))} consideradas)"
-        )
+        logger.info(f"[FASE 3] MEMÓRIAS: {len(memories)} recuperadas ({memory_awareness.get('total_considered', len(memories))} consideradas)")
         if context["memory_awareness"]:
             logger.info(f"[FASE 3] Consciência de memória:\n{context['memory_awareness']}")
         for i, mem in enumerate(memories, 1):
             logger.info(f"  {i}. [{mem.type.name if mem.type else '?'}] {mem.title}")
-            logger.debug(f"     - Importância: {mem.importance_score:.2f}, Valência Emocional: {mem.emotional_valence}")
-            logger.debug(f"     - Conteúdo: {mem.content[:100]}...")
-        
-        if not memories:
-            logger.debug(f"[FASE 3] Nenhuma memória relevante encontrada para: '{query[:50]}...'")
 
-        # Identidade e estado
-        context["agent_identity"] = self.get_agent_identity()
-
-        # Relação com o utilizador (disponível para todos os micro-agentes)
-        if user_id:
-            context["relationship_snapshot"] = self.identity.get_relationship_snapshot(user_id)
-            context["user_id"] = user_id
-
-        if doc_context.get("has_documents"):
-            context["documents_context"] = doc_context.get("context_text", "")
-
-        # === FASE 4: ANÁLISE EMOCIONAL ===
-        emotional_reaction = self.emotions.process_interaction(
-            user_message=query,
-            agent_response="",
-            user_id=user_id
-        )
-
-        emotional_context = self.emotions.get_emotional_context_for_prompt(
-            response_modifier=emotional_reaction.get("response_modifier")
-        )
-
-        context["emotional_context"] = emotional_context
-        context["emotional_modifiers"] = self.emotions.get_emotional_modifiers()
-        context["emotional_reaction"] = emotional_reaction
-
-        logger.info(f"[FASE 4] EMOCIONAL: Emoção detectada = {emotional_reaction.get('emotional_reaction', 'neutro')}")
-        logger.info(f"  - Intensidade: {emotional_reaction.get('intensity', 0):.0%}")
-        logger.info(f"  - Humor atual: {emotional_reaction.get('current_mood', 'N/A')}")
-        logger.info(f"  - Modificador de resposta: {emotional_reaction.get('response_modifier', 'nenhum')}")
-        logger.debug(f"[FASE 4] Contexto emocional: {json.dumps(emotional_context, ensure_ascii=False)[:150]}...")
-
-        # === FASE 5: REDE NEURAL ===
-        neural_modifiers = self.neural_network.get_micro_agent_modifiers(query, context)
         logger.info(f"[FASE 5] REDE NEURAL: Modificadores calculados")
-        for agent_name, modifiers in neural_modifiers.items():
-            logger.debug(f"  • {agent_name}: {json.dumps(modifiers, ensure_ascii=False)}")
 
         # Registar processo
         if record_process:
@@ -284,7 +307,7 @@ class CognitiveOrchestrator:
             self.db.add(self.thought_process)
             self.db.flush()
 
-        # === FASE 6: PENSAMENTO PARALELO ===
+        # === FASE 6: PENSAMENTO PARALELO DOS MICRO-AGENTES ===
         thinking_results = await self._run_micro_agents_parallel_enhanced(
             query, context, neural_modifiers
         )
@@ -306,7 +329,6 @@ class CognitiveOrchestrator:
             importance=final_response.get("confidence", 0.5)
         )
 
-        # Actualizar metadata da sessão
         live_mem = context.get("conversation_memory", {})
         self.conversations.update_session_metadata(
             session,
@@ -315,51 +337,56 @@ class CognitiveOrchestrator:
             unresolved=live_mem.get("pending_user_question") or None,
         )
 
-        # === FASE 9: REGISTAR PROCESSO ===
-        if record_process and self.thought_process:
-            self.thought_process.status = "completed"
-            self.thought_process.end_time = datetime.utcnow()
-            self.thought_process.final_response = agent_response_text
-            self.thought_process.confidence = final_response.get("confidence")
-            self.thought_process.reasoning = final_response.get("reasoning")
-            self.db.commit()
+        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
-            for i, (agent_type, result) in enumerate(thinking_results.items()):
-                contribution = ThoughtContribution(
-                    thought_process_id=self.thought_process.id,
-                    micro_agent_id=self._get_micro_agent_id(agent_type),
-                    thinking_step=i,
-                    perspective=result.get("perspective", ""),
-                    confidence=result.get("confidence", 0.5),
-                    supporting_arguments=result.get("supporting_arguments", []),
-                    opposing_arguments=result.get("opposing_arguments", []),
-                    weight_in_decision=result.get("weight", 1.0),
-                    was_decisive=result.get("was_decisive", False),
-                )
-                self.db.add(contribution)
-            self.db.commit()
-
-        # === FASE 10: APRENDIZAGEM ===
+        # === FASE 9+10: REGISTAR PROCESSO + APRENDIZAGEM (async, não bloqueia resposta) ===
+        interaction_id = None
         try:
             interaction_id = self.learning.record_interaction(
-                query=query,
-                response=agent_response_text,
-                user_id=user_id,
-                context=context
+                query=query, response=agent_response_text,
+                user_id=user_id, context=context
             )
-            self.neural_network.create_learning_memory(
-                interaction_type="reasoning",
-                success=final_response.get("confidence", 0.5) > 0.6,
-                query=query,
-                response=agent_response_text,
-                confidence=final_response.get("confidence", 0.5),
-                user_context={"user_id": user_id}
-            )
-            logger.info(f"[FASE 10] APRENDIZAGEM: Interação registada (ID: {interaction_id})")
         except Exception as e:
-            logger.warning(f"[FASE 10] Erro ao registar aprendizagem: {e}")
+            logger.warning(f"[APRENDIZAGEM] Erro ao registar: {e}")
 
-        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        async def _post_response_tasks():
+            try:
+                if record_process and self.thought_process:
+                    self.thought_process.status = "completed"
+                    self.thought_process.end_time = datetime.utcnow()
+                    self.thought_process.final_response = agent_response_text
+                    self.thought_process.confidence = final_response.get("confidence")
+                    self.thought_process.reasoning = final_response.get("reasoning")
+                    self.db.commit()
+
+                    for i, (agent_type, result) in enumerate(thinking_results.items()):
+                        contribution = ThoughtContribution(
+                            thought_process_id=self.thought_process.id,
+                            micro_agent_id=self._get_micro_agent_id(agent_type),
+                            thinking_step=i,
+                            perspective=result.get("perspective", ""),
+                            confidence=result.get("confidence", 0.5),
+                            supporting_arguments=result.get("supporting_arguments", []),
+                            opposing_arguments=result.get("opposing_arguments", []),
+                            weight_in_decision=result.get("weight", 1.0),
+                            was_decisive=result.get("was_decisive", False),
+                        )
+                        self.db.add(contribution)
+                    self.db.commit()
+
+                await loop.run_in_executor(
+                    None, self.neural_network.create_learning_memory,
+                    "reasoning",
+                    final_response.get("confidence", 0.5) > 0.6,
+                    query, agent_response_text,
+                    final_response.get("confidence", 0.5),
+                    {"user_id": user_id}
+                )
+                logger.info(f"[ASYNC] Aprendizagem e processo registados (ID: {interaction_id})")
+            except Exception as e:
+                logger.warning(f"[ASYNC] Erro em tarefas pós-resposta: {e}")
+
+        asyncio.create_task(_post_response_tasks())
 
         # Adicionar metadata
         final_response["duration_ms"] = duration_ms
@@ -369,7 +396,6 @@ class CognitiveOrchestrator:
         final_response["conversation_id"] = session.id
         final_response["persona_state"] = self.persona.get_state_summary() if self.persona.has_persona else None
 
-        # === RESUMO FINAL ===
         logger.info(f"✅ PROCESSO COMPLETO")
         logger.info(f"   ⏱️  Tempo total: {duration_ms}ms")
         logger.info(f"   📊 Memórias usadas: {len(memories)} de {len(context.get('memory', []))}")

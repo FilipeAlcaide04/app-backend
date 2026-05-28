@@ -6,7 +6,7 @@ Otimiza recursos e tempo de resposta
 from sqlalchemy.orm import Session
 from data.schema_cognitive import MicroAgent, MicroAgentType, Agent, Document, Memory
 from llm_logic.embedding_generator import EmbeddingGenerator
-from llm_logic.llm_client import LLMClient
+from llm_logic.llm_client import get_llm_client
 from typing import Dict, List, Optional, Tuple
 import logging
 from datetime import datetime
@@ -21,7 +21,7 @@ class RelevanceEvaluator:
         self.db = db
         self.agent_id = agent_id
         self.embedding_generator = EmbeddingGenerator()
-        self.llm_client = LLMClient()
+        self.llm_client = get_llm_client()
         self.agent = self._load_agent()
     
     def _load_agent(self) -> Agent:

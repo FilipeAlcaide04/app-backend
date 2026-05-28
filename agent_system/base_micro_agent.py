@@ -59,8 +59,8 @@ class BaseMicroAgent(ABC):
     def llm_client(self):
         if self._llm_client is None:
             try:
-                from llm_logic.llm_client import LLMClient
-                self._llm_client = LLMClient()
+                from llm_logic.llm_client import get_llm_client
+                self._llm_client = get_llm_client()
             except Exception as e:
                 logger.error(f"Erro ao inicializar LLMClient: {e}")
                 self._llm_client = None

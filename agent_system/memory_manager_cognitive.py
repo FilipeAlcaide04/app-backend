@@ -561,8 +561,8 @@ class MemoryManager:
         )
 
         try:
-            from llm_logic.llm_client import LLMClient
-            return LLMClient().generate(prompt, max_tokens=900, temperature=0.15).strip()
+            from llm_logic.llm_client import get_llm_client
+            return get_llm_client().generate(prompt, max_tokens=900, temperature=0.15).strip()
         except Exception as e:
             logger.debug(f"[memory-awareness] falha ao resumir memórias: {e}")
             return "\n".join(memory_lines[:10])
