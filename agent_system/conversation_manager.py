@@ -472,7 +472,7 @@ class ConversationManager:
             return f"Conversa sobre: {'; '.join(user_msgs)}. {len(messages)} mensagens."
 
     def _extract_personal_info(self, messages: List[Dict]) -> str:
-        """Extrai informação pessoal partilhada pelo utilizador via LLM."""
+        """Extrai informação pessoal partilhada pelo utilizador via LLM (single call, JSON)."""
         if not messages:
             return ""
 
@@ -487,10 +487,27 @@ class ConversationManager:
 
         try:
             from llm_logic.llm_client import get_llm_client
-            result = get_llm_client().generate(prompt, max_tokens=150, temperature=0.2)
-            result = (result or "").strip()
-            if result and result.upper() not in {"NONE", "NADA"}:
-                return result
+            raw = get_llm_client().generate(prompt, max_tokens=200, temperature=0.2)
+            raw = (raw or "").strip()
+            if not raw:
+                return ""
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                s = raw.find("{")
+                e = raw.rfind("}")
+                parsed = json.loads(raw[s:e + 1]) if s >= 0 and e > s else {}
+
+            facts = parsed.get("facts", [])
+            if not facts:
+                return ""
+
+            lines = []
+            for f in facts:
+                fact_text = str(f.get("fact", "")).strip()
+                if fact_text and len(fact_text.split()) >= 3:
+                    lines.append(fact_text)
+            return "\n".join(lines) if lines else ""
         except Exception:
             pass
         return ""

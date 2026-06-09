@@ -98,10 +98,7 @@ class CoreAgent:
         logger.info(f"[SÍNTESE] ✓ Resposta final gerada ({len(final_text)} chars)")
         logger.info(f"[FINAL OUTPUT]\n{final_text}")
 
-        # 4. Auto-gerar memórias se a conversa for significativa
-        self._auto_generate_memories(query, final_text, context, user_id)
-
-        # 5. Calcular confiança
+        # 4. Calcular confiança
         confidence = self._calculate_final_confidence(weighted)
         logger.info(f"[SÍNTESE] Confiança final: {confidence:.2f}")
 
@@ -121,9 +118,6 @@ class CoreAgent:
         if user_id:
             self._update_relationship(user_id, context)
             relationship_snapshot = self.identity.get_relationship_snapshot(user_id)
-
-        # 8. Auto-reflexão (async-safe, não bloqueia)
-        self._self_reflect(query, final_text, context, user_id)
 
         return {
             "response": final_text,
@@ -480,8 +474,7 @@ class CoreAgent:
                 max_tokens=1000,
                 temperature=0.75,
             ).strip()
-            response = self._validate_response(response, query, persona_name)
-            return self._repair_direct_address(response, query, voice.get("name", ""))
+            return self._validate_and_repair(response, query, persona_name, voice)
         except Exception as e:
             logger.error(f"Erro ao gerar resposta com LLM: {e}")
             return cleaned if cleaned else "Desculpa, estou com dificuldade em articular o que quero dizer agora."
@@ -519,13 +512,13 @@ class CoreAgent:
 
         return "\n".join(lines)
 
-    def _validate_response(self, response: str, query: str, persona_name: str) -> str:
-        """LLM-based check for role confusion: echoing, speaking as user, or 3rd person self-reference."""
+    def _validate_and_repair(self, response: str, query: str, persona_name: str, voice: Dict) -> str:
+        """Single-pass validation: checks all response problems at once, repairs if needed."""
         if not response or not query:
             return response
 
         check_prompt = self.prompts.render(
-            "core.response_role_check",
+            "core.response_validation",
             persona_name=persona_name,
             query=query,
             response=response,
@@ -539,62 +532,32 @@ class CoreAgent:
                 end = raw.rfind("}")
                 parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
 
-            if not parsed.get("is_valid", True):
-                reason = parsed.get("reason", "role confusion")
-                logger.warning(f"[VALIDATE] Response failed role check: {reason}. Regenerating.")
-                repair_prompt = self.prompts.render(
-                    "core.response_role_repair",
-                    persona_name=persona_name,
-                    query=query,
-                    response=response,
-                    problem=reason,
-                )
-                repaired = self.llm_client.generate(
-                    repair_prompt, max_tokens=700, temperature=0.4,
-                    system_prompt=f"You are {persona_name}. Rewrite the response fixing the role confusion. Speak as yourself in first person.",
-                ).strip()
-                return repaired or response
+            if parsed.get("is_valid", True):
+                return response
+
+            problems = parsed.get("problems", [])
+            reason = parsed.get("reason", "validation failed")
+            logger.warning(f"[VALIDATE] Response problems: {problems} — {reason}")
+
+            voice_name = voice.get("name", persona_name)
+            repair_prompt = self.prompts.render(
+                "core.response_repair",
+                persona_name=persona_name,
+                query=query,
+                response=response,
+                problems=", ".join(problems) if problems else reason,
+                target_language=getattr(self.agent, "language", "pt-PT") or "pt-PT",
+            )
+            repaired = self.llm_client.generate(
+                repair_prompt, max_tokens=700, temperature=0.3,
+                system_prompt=f"You are {voice_name}. Fix the response. Speak as yourself in first person.",
+            ).strip()
+            return repaired or response
+
         except Exception as e:
             logger.debug(f"[VALIDATE] Check failed: {e}")
 
         return response
-
-    def _repair_direct_address(self, response: str, query: str, voice_name: str) -> str:
-        if not response:
-            return response
-
-        check_prompt = self.prompts.render(
-            "core.direct_address_check",
-            query=query,
-            response=response,
-        )
-        try:
-            raw_check = self.llm_client.generate(check_prompt, max_tokens=120, temperature=0.1).strip()
-            try:
-                parsed = json.loads(raw_check)
-            except json.JSONDecodeError:
-                start = raw_check.find("{")
-                end = raw_check.rfind("}")
-                parsed = json.loads(raw_check[start:end + 1]) if start >= 0 and end > start else {}
-            if not bool(parsed.get("needs_repair")):
-                return response
-        except Exception as e:
-            logger.debug(f"Falha ao detectar fala indirecta: {e}")
-            return response
-
-        repair_prompt = self.prompts.render(
-            "core.direct_address_repair",
-            voice_name=voice_name or "a persona",
-            query=query,
-            response=response,
-            target_language=getattr(self.agent, "language", "pt-PT") or "pt-PT",
-        )
-        try:
-            repaired = self.llm_client.generate(repair_prompt, max_tokens=700, temperature=0.2).strip()
-            return repaired or response
-        except Exception as e:
-            logger.debug(f"Falha ao reparar fala directa: {e}")
-            return response
 
     def _get_state_modifiers(self, reaction_type: str) -> str:
         """Gera texto de modificadores de estado para o prompt"""
@@ -661,101 +624,91 @@ class CoreAgent:
         user_id: Optional[str]
     ):
         """
-        Auto-gera memórias quando a conversa é significativa.
-        O agente aprende e lembra-se de coisas importantes.
+        Single AI call analyzes the interaction and extracts everything worth remembering:
+        name, personal facts, emotional significance. Runs in background after response.
         """
-
         try:
             user_name = context.get("user_name", user_id or "utilizador")
 
-            detected_name = self._extract_user_name_semantic(query)
-            if detected_name:
-                self.memory_manager.create_memory(
-                    title=f"O nome desta pessoa é {detected_name}",
-                    content=f"A pessoa disse-me que se chama {detected_name}. "
-                           f"Devo lembrar-me e usar o nome dela nas conversas.",
-                    memory_type="relational",
-                    importance_score=0.9,
-                    emotional_valence=0.3,
-                    relates_to_topics=["user_name", "user_info", user_id or "unknown"]
-                )
-                if user_id:
-                    self.identity.update_relationship(
-                        user_id=user_id, user_name=detected_name,
-                        familiarity_change=0.05, affection_change=0.02,
-                    )
-
-            self._llm_extract_user_info(query, response, user_name, user_id)
-
-            # Detectar carga emocional significativa
-            reaction = context.get("emotional_reaction", {})
-            if isinstance(reaction, dict) and reaction.get("intensity", 0) > 0.5:
-                reaction_type = reaction.get("emotional_reaction", "")
-                self.memory_manager.create_memory(
-                    title=f"Momento emocional com {user_name}: {reaction_type}",
-                    content=f"Senti {reaction_type} quando {user_name} me disse: {query[:100]}. "
-                           f"A minha reacção foi intensa.",
-                    memory_type="emotional",
-                    importance_score=0.7,
-                    emotional_valence=-0.3 if reaction_type in ["angry", "hurt", "threatened"] else 0.3,
-                    relates_to_topics=["emotional_event", reaction_type, user_id or "unknown"]
-                )
-
-        except Exception as e:
-            logger.debug(f"Erro ao auto-gerar memórias: {e}")
-
-    def _extract_user_name_semantic(self, query: str) -> str:
-        """Extrai semanticamente como a pessoa quer ser chamada."""
-        if not (query or "").strip():
-            return ""
-        try:
             prompt = self.prompts.render(
-                "memory.user_identity_extraction",
-                message=query[:800],
-            )
-            raw = self.llm_client.generate(prompt, max_tokens=120, temperature=0.1).strip()
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                start = raw.find("{")
-                end = raw.rfind("}")
-                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
-            name = str(parsed.get("name") or "").strip()
-            confidence = parsed.get("confidence", 0)
-            if name and isinstance(confidence, (int, float)) and confidence >= 0.65:
-                return name[:80]
-        except Exception as e:
-            logger.debug(f"Extração semântica de identidade falhou: {e}")
-        return ""
-
-    def _llm_extract_user_info(self, query: str, response: str, user_name: str, user_id: Optional[str]):
-        """Extrai factos pessoais por prompt editável em BD."""
-        try:
-            prompt = self.prompts.render(
-                "memory.user_fact_extraction",
+                "memory.interaction_analysis",
                 user_name=user_name,
                 query=query[:800],
                 response=response[:500],
             )
-            result = self.llm_client.generate(prompt, max_tokens=80, temperature=0.2)
-            result = (result or "").strip()
-            fact = ""
-            if result.startswith("FACT:"):
-                fact = result[5:].strip()
-            elif result.startswith("FACTO:"):
-                fact = result[6:].strip()
-            if fact:
-                if len(fact) > 5:
+            raw = self.llm_client.generate(prompt, max_tokens=300, temperature=0.15).strip()
+
+            try:
+                analysis = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start >= 0 and end > start:
+                    analysis = json.loads(raw[start:end + 1])
+                else:
+                    return
+
+            # Process name if detected with high confidence
+            name_data = analysis.get("person_name", {})
+            detected_name = str(name_data.get("value") or "").strip()
+            name_confidence = name_data.get("confidence", 0)
+            if detected_name and isinstance(name_confidence, (int, float)) and name_confidence >= 0.8:
+                name_content = f"{detected_name} told me their name. I should remember and use it."
+                if self.memory_manager.should_store_memory(detected_name, name_content, "relational"):
                     self.memory_manager.create_memory(
-                        title=f"{user_name}: {fact[:80]}",
-                        content=f"{user_name} revealed: {fact}. Context: \"{query[:150]}\"",
+                        title=f"This person's name is {detected_name}",
+                        content=name_content,
                         memory_type="relational",
-                        importance_score=0.65,
-                        emotional_valence=0.1,
-                        relates_to_topics=["user_info", "llm_extracted", user_id or "unknown"]
+                        importance_score=0.9,
+                        emotional_valence=0.3,
+                        relates_to_topics=["user_name", "user_info", user_id or "unknown"]
                     )
+                    if user_id:
+                        self.identity.update_relationship(
+                            user_id=user_id, user_name=detected_name,
+                            familiarity_change=0.05, affection_change=0.02,
+                        )
+
+            # Process extracted facts
+            for fact_data in analysis.get("facts", []):
+                fact = str(fact_data.get("fact") or "").strip()
+                importance = fact_data.get("importance", 0.5)
+                fact_type = fact_data.get("type", "experience")
+                if not fact or len(fact.split()) < 3:
+                    continue
+
+                fact_title = f"{user_name}: {fact[:80]}"
+                fact_content = f"{user_name} revealed: {fact}. Context: \"{query[:150]}\""
+
+                if self.memory_manager.should_store_memory(fact_title, fact_content, "relational"):
+                    self.memory_manager.create_memory(
+                        title=fact_title,
+                        content=fact_content,
+                        memory_type="relational",
+                        importance_score=max(0.3, min(1.0, float(importance))),
+                        emotional_valence=0.1,
+                        relates_to_topics=["user_info", fact_type, user_id or "unknown"]
+                    )
+
+            # Process emotional significance
+            emo = analysis.get("emotional_significance", {})
+            if emo.get("is_significant") and emo.get("what_i_felt"):
+                emo_text = str(emo["what_i_felt"]).strip()
+                emo_title = f"Emotional moment with {user_name}: {emo_text[:50]}"
+                emo_content = f"I felt {emo_text} when {user_name} said: {query[:100]}"
+
+                if self.memory_manager.should_store_memory(emo_title, emo_content, "emotional"):
+                    self.memory_manager.create_memory(
+                        title=emo_title,
+                        content=emo_content,
+                        memory_type="emotional",
+                        importance_score=0.7,
+                        emotional_valence=0.2,
+                        relates_to_topics=["emotional_event", user_id or "unknown"]
+                    )
+
         except Exception as e:
-            logger.debug(f"LLM user info extraction failed: {e}")
+            logger.debug(f"Erro ao auto-gerar memórias: {e}")
 
     # ================================================================
     # SELF-REFLECTION
@@ -797,14 +750,17 @@ class CoreAgent:
                 reflection = result[9:].strip()
             if reflection:
                 if len(reflection) > 10:
-                    self.memory_manager.create_memory(
-                        title=f"Reflection: {reflection[:60]}",
-                        content=f"After speaking with {user_name}, I thought: {reflection}",
-                        memory_type="episodic",
-                        importance_score=0.45,
-                        emotional_valence=0.1,
-                        relates_to_topics=["self_reflection", "growth", user_id or "unknown"]
-                    )
+                    ref_title = f"Reflection: {reflection[:60]}"
+                    ref_content = f"After speaking with {user_name}, I thought: {reflection}"
+                    if self.memory_manager.should_store_memory(ref_title, ref_content, "episodic"):
+                        self.memory_manager.create_memory(
+                            title=ref_title,
+                            content=ref_content,
+                            memory_type="episodic",
+                            importance_score=0.45,
+                            emotional_valence=0.1,
+                            relates_to_topics=["self_reflection", "growth", user_id or "unknown"]
+                        )
         except Exception as e:
             logger.debug(f"Self-reflection failed: {e}")
 

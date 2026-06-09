@@ -290,70 +290,67 @@ class NeuralNetworkLayer:
         user_context: Optional[Dict] = None
     ) -> Optional[Memory]:
         """
-        Cria memória de aprendizado baseado em interação
-        Permite ao sistema evoluir com experiência
+        Creates a learning memory only when the interaction produced a genuine insight.
+        Uses AI to extract the actual lesson instead of storing boilerplate.
         """
-        
+
         from agent_system.memory_manager_cognitive import MemoryManager
-        
+
         memory_manager = MemoryManager(self.db, self.agent_id)
-        
-        # Evitar guardar interações triviais (ruído)
+
         if self._is_trivial_interaction(query):
             return None
 
-        topic = self._extract_query_topic(query)
         signature = self._learning_signature(interaction_type, query)
 
-        # Determinar tipo de memória
-        if success and confidence > 0.8:
-            memory_type = "semantic"  # Conhecimento bem estabelecido
-            importance = 0.8
-        elif success:
-            memory_type = "episodic"
-            importance = 0.55
-        else:
-            memory_type = "semantic"  # Aprender com falhas também
-            importance = 0.65
-        
-        # Criar título descritivo
-        memory_title = f"Aprendizado: {interaction_type} ({'sucesso' if success else 'desafio'})"
-        
-        # Criar conteúdo
-        memory_content = (
-            f"Assunto: {topic}\n"
-            f"Resultado: {'sucesso' if success else 'desafio'}\n"
-            f"Confiança: {confidence:.1%}\n"
-            f"Lição: {'abordagem funcionou para este tipo de interação' if success else 'é preciso rever abordagem para este tipo de interação'}\n"
-            f"Contexto: {json.dumps(user_context or {}, ensure_ascii=False)}\n"
-            f"Signature: {signature}"
-        )
-
-        # Evitar duplicação recente da mesma aprendizagem
         duplicate = self.db.query(Memory).filter(
             Memory.agent_id == self.agent_id,
-            Memory.title == memory_title,
-            Memory.content.like(f"%Signature: {signature}%"),
+            Memory.content.like(f"%{signature}%"),
             Memory.created_at >= datetime.utcnow() - timedelta(days=7),
             Memory.is_blocked == False,
         ).first()
         if duplicate:
             return duplicate
-        
-        # Valência emocional
-        emotional_valence = 0.5 if success else -0.3
-        
-        # Criar memória
-        memory = memory_manager.create_memory(
-            title=memory_title,
-            content=memory_content,
-            memory_type=memory_type,
-            importance_score=importance,
-            emotional_valence=emotional_valence,
-            relates_to_topics=["learning", "interaction", interaction_type, topic]
-        )
 
-        return memory
+        try:
+            from llm_logic.llm_client import get_llm_client
+            prompt = (
+                f"I just had a conversation. The person said: \"{query[:400]}\"\n"
+                f"I replied: \"{response[:400]}\"\n"
+                f"Confidence: {confidence:.0%}. Outcome: {'worked well' if success else 'could improve'}.\n\n"
+                f"Extract a concrete, reusable lesson I can apply to future conversations. "
+                f"Not a summary of what happened — a genuine insight about how to handle similar situations.\n\n"
+                f"If there is no real lesson (trivial exchange, greeting, etc.), respond with just: NONE\n"
+                f"Otherwise respond with just the lesson in one sentence, starting with: LESSON:"
+            )
+            raw = get_llm_client().generate(prompt, max_tokens=100, temperature=0.2).strip()
+
+            if raw.startswith("NONE") or "LESSON:" not in raw:
+                return None
+
+            lesson = raw.split("LESSON:")[1].strip()
+            if len(lesson) < 10:
+                return None
+
+            memory_title = f"Learned: {lesson[:60]}"
+            memory_content = f"{lesson}\n[sig:{signature}]"
+
+            if not memory_manager.should_store_memory(memory_title, memory_content, "semantic"):
+                return None
+
+            memory = memory_manager.create_memory(
+                title=memory_title,
+                content=memory_content,
+                memory_type="semantic",
+                importance_score=0.55 if success else 0.65,
+                emotional_valence=0.3 if success else -0.2,
+                relates_to_topics=["learning", interaction_type]
+            )
+            return memory
+
+        except Exception as e:
+            logger.debug(f"[learning] create_learning_memory failed: {e}")
+            return None
 
     def _is_trivial_interaction(self, query: str) -> bool:
         text = (query or "").strip()

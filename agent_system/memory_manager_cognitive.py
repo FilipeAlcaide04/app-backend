@@ -151,12 +151,30 @@ class MemoryManager:
         normalized_content = re.sub(r"\s+", " ", (content or "").strip().lower())
 
         # Evitar duplicados pelo conteúdo estável, mesmo que venham de caminhos diferentes.
-        # A mesma memória não deve existir duas vezes só porque o tipo/valência/tópicos mudaram.
         existing = self.db.query(Memory).filter(
             Memory.agent_id == self.agent_id,
             func.lower(func.regexp_replace(Memory.content, r"\s+", " ", "g")) == normalized_content,
             Memory.is_blocked == False,
         ).first()
+
+        # Semantic dedup for all memory types — catches near-duplicates with different wording
+        if not existing:
+            try:
+                new_embedding = self.embedding_generator.generate_embedding(content)
+                candidates = self.db.query(Memory).filter(
+                    Memory.agent_id == self.agent_id,
+                    Memory.type_id == mem_type.id,
+                    Memory.is_blocked == False,
+                    Memory.created_at >= datetime.utcnow() - timedelta(days=30),
+                ).limit(50).all()
+                for cand in candidates:
+                    if cand.embeddings:
+                        sim = self._cosine_similarity(new_embedding, cand.embeddings[0].embedding)
+                        if sim > 0.82:
+                            existing = cand
+                            break
+            except Exception as e:
+                logger.debug(f"Semantic dedup failed: {e}")
         if existing:
             existing.last_accessed = datetime.utcnow()
             existing.access_count = (existing.access_count or 0) + 1
@@ -360,6 +378,76 @@ class MemoryManager:
         
         return True
     
+    def should_store_memory(self, title: str, content: str, memory_type: str = "relational") -> bool:
+        """
+        AI gate: decides whether a candidate memory should be stored,
+        comparing against similar existing memories via embeddings + LLM.
+        """
+        try:
+            new_embedding = self.embedding_generator.generate_embedding(content)
+
+            existing = self.db.query(Memory).filter(
+                Memory.agent_id == self.agent_id,
+                Memory.is_blocked == False,
+            ).order_by(Memory.created_at.desc()).limit(100).all()
+
+            similar = []
+            for mem in existing:
+                if mem.embeddings:
+                    sim = self._cosine_similarity(new_embedding, mem.embeddings[0].embedding)
+                    if sim > 0.5:
+                        similar.append((sim, mem))
+
+            similar.sort(key=lambda x: -x[0])
+            top_similar = similar[:5]
+
+            if not top_similar:
+                return True
+
+            # Very high similarity = obvious duplicate, skip LLM call
+            if top_similar[0][0] > 0.92:
+                logger.info(f"[MEMORY GATE] Auto-rejected (sim={top_similar[0][0]:.2f}): '{title[:50]}'")
+                return False
+
+            existing_list = "\n".join(
+                f"- (sim={sim:.2f}) {m.title}: {(m.content or '')[:150]}"
+                for sim, m in top_similar
+            )
+
+            from llm_logic.llm_client import get_llm_client
+            prompt = (
+                f"New memory candidate:\n"
+                f"Title: {title}\nContent: {content[:250]}\nType: {memory_type}\n\n"
+                f"Similar existing memories:\n{existing_list}\n\n"
+                f"Should the new memory be stored? Answer ONLY with JSON: {{\"store\": true/false, \"reason\": \"short\"}}\n\n"
+                f"Store = false if:\n"
+                f"- Same fact already exists (even if worded differently)\n"
+                f"- Content is trivial, vague, or adds nothing specific\n"
+                f"- It's a generic observation like 'the conversation went well'\n\n"
+                f"Store = true if:\n"
+                f"- It contains a specific new fact, name, preference, or experience\n"
+                f"- It updates or corrects an existing memory with new information\n"
+                f"- It captures something emotionally significant not yet recorded"
+            )
+
+            raw = get_llm_client().generate(prompt, max_tokens=80, temperature=0.1).strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+
+            should_store = parsed.get("store", True)
+            reason = parsed.get("reason", "")
+            if not should_store:
+                logger.info(f"[MEMORY GATE] Rejected: '{title[:50]}' — {reason}")
+            return bool(should_store)
+
+        except Exception as e:
+            logger.debug(f"[MEMORY GATE] Error, storing as fallback: {e}")
+            return True
+
     def get_recent_memories(self, days: int = 7, limit: int = 20) -> List[Memory]:
         """Obtém memórias recentes"""
         cutoff = datetime.utcnow() - timedelta(days=days)
@@ -472,92 +560,126 @@ class MemoryManager:
         self,
         query: str,
         conversation_context: str = "",
-        max_memories: int = 36,
+        max_memories: int = 24,
     ) -> Dict[str, object]:
         """
-        Constrói uma visão ampla mas compacta das memórias.
-        Combina memórias semanticamente relevantes, textualmente relevantes,
-        importantes e recentes, depois pede ao LLM para condensar continuidade,
-        factos estáveis e conflitos num briefing utilizável pela resposta final.
+        Builds layered memory awareness with priority:
+        Layer 1 (IDENTITY): Name, core facts, user identity — always included
+        Layer 2 (RELATIONSHIP): Feelings, preferences, history with this person
+        Layer 3 (RELEVANT): Semantically relevant to current query
+        Layer 4 (RECENT): Latest interactions for continuity
+
+        Each layer gets token budget by priority. Better memories, fewer of them.
         """
 
         combined_query = f"{conversation_context}\n{query}".strip()
-        selected: Dict[str, Memory] = {}
+        all_candidates: Dict[str, Memory] = {}
 
         def add_many(items: List[Memory]):
             for mem in items:
                 if mem and not self._is_noisy_learning_memory(mem):
-                    selected[mem.id] = mem
+                    all_candidates[mem.id] = mem
 
         add_many(self.search_memories_semantic(
             combined_query or query,
-            top_k=max_memories,
-            min_similarity=0.16,
+            top_k=max_memories * 2,
+            min_similarity=0.2,
         ))
         add_many(self.recall_relevant_memories(
             combined_query or query,
             limit=16,
-            min_similarity=0.18,
+            min_similarity=0.2,
             include_learning=False,
         ))
-        add_many(self.get_important_memories(limit=14))
+        add_many(self.get_important_memories(limit=10))
         add_many(
             self.db.query(Memory)
             .filter(Memory.agent_id == self.agent_id, Memory.is_blocked == False)
             .order_by(Memory.created_at.desc())
-            .limit(12)
+            .limit(8)
             .all()
         )
 
-        memories = list(selected.values())
-        memories.sort(
-            key=lambda m: (
-                float(m.importance_score or 0),
-                float(m.relevance_score or 0),
-                m.created_at or datetime.min,
-            ),
-            reverse=True,
-        )
-        memories = memories[:max_memories]
+        # Classify into layers
+        identity_mems = []
+        relationship_mems = []
+        relevant_mems = []
+        recent_mems = []
 
-        awareness = self._summarize_memory_awareness(query, conversation_context, memories)
+        for mem in all_candidates.values():
+            mem_type = mem.type.name if mem.type else "unknown"
+            topics = {str(t).lower() for t in (mem.relates_to_topics or [])}
+            importance = float(mem.importance_score or 0)
+
+            if "user_name" in topics or "user_info" in topics or mem_type == "relational":
+                relationship_mems.append(mem)
+            elif mem_type in ("autobiographical", "semantic") and importance >= 0.6:
+                identity_mems.append(mem)
+            elif mem_type == "emotional" or "self_reflection" in topics:
+                relevant_mems.append(mem)
+            else:
+                recent_mems.append(mem)
+
+        # Sort each layer by importance/recency
+        identity_mems.sort(key=lambda m: float(m.importance_score or 0), reverse=True)
+        relationship_mems.sort(key=lambda m: (m.created_at or datetime.min), reverse=True)
+        relevant_mems.sort(key=lambda m: float(m.importance_score or 0), reverse=True)
+        recent_mems.sort(key=lambda m: (m.created_at or datetime.min), reverse=True)
+
+        # Budget per layer: identity gets most, then relationship, then relevant, then recent
+        layered = []
+        layered.extend(("IDENTITY", m) for m in identity_mems[:8])
+        layered.extend(("RELATIONSHIP", m) for m in relationship_mems[:6])
+        layered.extend(("RELEVANT", m) for m in relevant_mems[:6])
+        layered.extend(("RECENT", m) for m in recent_mems[:4])
+
+        memories = [m for _, m in layered]
+
+        awareness = self._summarize_memory_awareness(query, conversation_context, layered)
         return {
             "summary": awareness,
             "memories": memories[:12],
-            "total_considered": len(selected),
+            "total_considered": len(all_candidates),
         }
 
     def _summarize_memory_awareness(
         self,
         query: str,
         conversation_context: str,
-        memories: List[Memory],
+        layered_memories: List[tuple],
     ) -> str:
-        if not memories:
+        if not layered_memories:
             return ""
 
-        memory_lines = []
-        for i, mem in enumerate(memories[:36], 1):
+        sections = {"IDENTITY": [], "RELATIONSHIP": [], "RELEVANT": [], "RECENT": []}
+        for layer, mem in layered_memories:
             topics = mem.relates_to_topics or []
             memory_type = mem.type.name if mem.type else "unknown"
-            ownership = (
-                "relationship/interlocutor context"
-                if memory_type == "relational"
-                else "persona-owned memory"
+            line = (
+                f"  - [{memory_type}] {mem.title}: {mem.content[:400]}"
+                f" (importance={float(mem.importance_score or 0):.1f})"
             )
-            memory_lines.append(
-                f"{i}. ID={mem.id}\n"
-                f"   Type={memory_type} | Ownership={ownership} | Title={mem.title}\n"
-                f"   Importance={float(mem.importance_score or 0):.2f} | Valence={float(mem.emotional_valence or 0):.2f} | Created={mem.created_at.isoformat() if mem.created_at else '?'} | Accesses={mem.access_count or 0}\n"
-                f"   Topics={topics}\n"
-                f"   Content={mem.content[:700]}"
-            )
+            sections.setdefault(layer, []).append(line)
+
+        memory_text_parts = []
+        layer_labels = {
+            "IDENTITY": "IDENTITY (who I am, core facts about me)",
+            "RELATIONSHIP": "RELATIONSHIP (what I know about this person)",
+            "RELEVANT": "RELEVANT (related to current topic)",
+            "RECENT": "RECENT (latest interactions)",
+        }
+        for layer_key in ["IDENTITY", "RELATIONSHIP", "RELEVANT", "RECENT"]:
+            lines = sections.get(layer_key, [])
+            if lines:
+                memory_text_parts.append(f"=== {layer_labels[layer_key]} ===\n" + "\n".join(lines))
+
+        memory_lines = "\n\n".join(memory_text_parts)
 
         prompt = self.prompts.render(
             "memory.awareness",
             query=query,
             conversation_context=conversation_context[:2200] or "(sem contexto recente)",
-            memory_lines="\n".join(memory_lines),
+            memory_lines=memory_lines,
         )
 
         try:
@@ -565,7 +687,7 @@ class MemoryManager:
             return get_llm_client().generate(prompt, max_tokens=900, temperature=0.15).strip()
         except Exception as e:
             logger.debug(f"[memory-awareness] falha ao resumir memórias: {e}")
-            return "\n".join(memory_lines[:10])
+            return memory_lines[:2000]
 
     def _is_noisy_learning_memory(self, memory: Memory) -> bool:
         topics = memory.relates_to_topics or []

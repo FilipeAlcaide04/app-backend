@@ -14,7 +14,7 @@ Pipeline:
 10. Registar aprendizagem + memórias automáticas
 """
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from data.schema_cognitive import (
     Agent, MicroAgent, MicroAgentType, ThoughtProcess, ThoughtContribution,
     Memory, MemoryType
@@ -45,6 +45,7 @@ class CognitiveOrchestrator:
     def __init__(self, db: Session, agent_id: str):
         self.db = db
         self.agent_id = agent_id
+        self._session_factory = sessionmaker(bind=db.get_bind())
         self.agent = self._load_agent()
         self.memory_manager = MemoryManager(db, agent_id)
         self.micro_agents = self._initialize_micro_agents()
@@ -190,26 +191,46 @@ class CognitiveOrchestrator:
         logger.info(f"[PARALELO 1] Lançando: live_memory + relevância + documentos + emocional")
 
         async def _live_memory():
-            return await loop.run_in_executor(
-                None, self.conversations.build_live_conversation_memory, current_messages
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    cm = ConversationManager(thread_db, self.agent_id)
+                    return cm.build_live_conversation_memory(current_messages)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         async def _relevance():
-            return await loop.run_in_executor(
-                None, self.relevance_evaluator.evaluate_all_micro_agents, query, context
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    re = RelevanceEvaluator(thread_db, self.agent_id)
+                    return re.evaluate_all_micro_agents(query, context)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         async def _documents():
             if not self.document_awareness.should_consult_documents(query):
                 return {}
-            return await loop.run_in_executor(
-                None, self.document_awareness.get_document_context_for_agent, query
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    da = DocumentAwareness(thread_db, self.agent_id)
+                    return da.get_document_context_for_agent(query)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         async def _emotional():
-            return await loop.run_in_executor(
-                None, self.emotions.process_interaction, query, "", user_id
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    em = EmotionalEngine(thread_db, self.agent_id)
+                    return em.process_interaction(query, "", user_id)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         live_mem_task = asyncio.create_task(_live_memory())
         relevance_task = asyncio.create_task(_relevance())
@@ -258,14 +279,24 @@ class CognitiveOrchestrator:
         memory_query = f"{conversation_memory_text}\n{context.get('conversation_thread', '')}\n{query}".strip()
 
         async def _memory_awareness():
-            return await loop.run_in_executor(
-                None, self.memory_manager.build_memory_awareness, query, memory_query
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    mm = MemoryManager(thread_db, self.agent_id)
+                    return mm.build_memory_awareness(query, memory_query)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         async def _neural_modifiers():
-            return await loop.run_in_executor(
-                None, self.neural_network.get_micro_agent_modifiers, query, context
-            )
+            def _run():
+                thread_db = self._session_factory()
+                try:
+                    nn = NeuralNetworkLayer(thread_db, self.agent_id)
+                    return nn.get_micro_agent_modifiers(query, context)
+                finally:
+                    thread_db.close()
+            return await loop.run_in_executor(None, _run)
 
         memory_task = asyncio.create_task(_memory_awareness())
         neural_task = asyncio.create_task(_neural_modifiers())
@@ -374,15 +405,30 @@ class CognitiveOrchestrator:
                         self.db.add(contribution)
                     self.db.commit()
 
-                await loop.run_in_executor(
-                    None, self.neural_network.create_learning_memory,
-                    "reasoning",
-                    final_response.get("confidence", 0.5) > 0.6,
-                    query, agent_response_text,
-                    final_response.get("confidence", 0.5),
-                    {"user_id": user_id}
-                )
-                logger.info(f"[ASYNC] Aprendizagem e processo registados (ID: {interaction_id})")
+                def _background_memory_and_learning():
+                    thread_db = self._session_factory()
+                    try:
+                        # 1. Auto-gerar memórias (nome, factos, emocionais)
+                        bg_core = CoreAgent(thread_db, self.agent_id)
+                        bg_core._auto_generate_memories(query, agent_response_text, context, user_id)
+
+                        # 2. Auto-reflexão
+                        bg_core._self_reflect(query, agent_response_text, context, user_id)
+
+                        # 3. Learning memory
+                        nn = NeuralNetworkLayer(thread_db, self.agent_id)
+                        nn.create_learning_memory(
+                            "reasoning",
+                            final_response.get("confidence", 0.5) > 0.6,
+                            query, agent_response_text,
+                            final_response.get("confidence", 0.5),
+                            {"user_id": user_id}
+                        )
+                    finally:
+                        thread_db.close()
+
+                await loop.run_in_executor(None, _background_memory_and_learning)
+                logger.info(f"[ASYNC] Memórias + reflexão + aprendizagem registados (ID: {interaction_id})")
             except Exception as e:
                 logger.warning(f"[ASYNC] Erro em tarefas pós-resposta: {e}")
 
@@ -478,7 +524,17 @@ class CognitiveOrchestrator:
             logger.debug(f"[PENSAMENTO] {micro_agent.thinking_type.value}: ativadas {neural_modifier['memory_count']} memórias")
 
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, micro_agent.think, query, enhanced_context)
+        def _run():
+            thread_db = self._session_factory()
+            try:
+                thread_agent = create_micro_agent(
+                    self.agent_id, micro_agent.micro_agent_id,
+                    micro_agent.thinking_type.value, thread_db
+                )
+                return thread_agent.think(query, enhanced_context)
+            finally:
+                thread_db.close()
+        result = await loop.run_in_executor(None, _run)
 
         base_weight = micro_agent.get_weight()
         result["weight"] = base_weight * neural_modifier.get("weight_modifier", 1.0)

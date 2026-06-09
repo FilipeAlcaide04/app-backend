@@ -301,7 +301,9 @@ class LogicalAgent(BaseMicroAgent):
         user_content = self._build_think_prompt(
             persona_ctx,
             query,
-            "Think as I would think: with my logic, my biases and my education level.",
+            "Think as I would think: with my logic, my biases and my education level. "
+            "What is the person actually asking or saying? What is the most useful, concrete thing I can contribute to my response? "
+            "If memory awareness mentions relevant facts, reason with them — don't ignore what I already know.",
         )
 
         perspective = self._call_llm(system_prompt, user_content, temperature=0.3)
@@ -334,10 +336,11 @@ class EmotionalAgent(BaseMicroAgent):
         persona_ctx = self._build_persona_context(context)
 
         task = (
-            "Two things: 1) What do YOU feel about what was said? Visceral reaction, no filter. "
-            "2) What do you think the OTHER PERSON is feeling? Read tone, energy, what's behind the words. "
-            "If they seem sad, acknowledge it. If excited, feel it with them. "
-            "Empathy isn't agreeing; it is feeling what the other feels."
+            "Two things: 1) What do YOU feel about what was said? Visceral, honest reaction — not what you should feel, what you DO feel. "
+            "2) What is the OTHER PERSON feeling? Read between the lines: tone, energy, what they didn't say. "
+            "If they seem sad, name it. If excited, feel it with them. If they're masking, notice the mask. "
+            "Use relationship history from memory awareness — how does your history with this person color your reaction? "
+            "Empathy isn't agreeing; it is feeling what the other feels and knowing why."
         )
 
         user_content = self._build_think_prompt(persona_ctx, query, task)
@@ -374,7 +377,10 @@ class CriticalAgent(BaseMicroAgent):
         user_content = self._build_think_prompt(
             persona_ctx,
             query,
-            "Is something off? Should I distrust this or protect myself? If everything is safe, recognize that so I do not create a false threat.",
+            "Is something off here? Should I be cautious, protect myself, or set a boundary? "
+            "Check: does what they said contradict what I know from memory? Are they manipulating, deflecting, or being genuine? "
+            "If everything is safe and genuine, say so clearly — don't manufacture threats. "
+            "A real critical sense distinguishes real danger from anxiety.",
         )
 
         perspective = self._call_llm(system_prompt, user_content, temperature=0.35)
@@ -409,7 +415,10 @@ class CreativeAgent(BaseMicroAgent):
         user_content = self._build_think_prompt(
             persona_ctx,
             query,
-            "What associations arise? Metaphors, memories, images, lateral links or unexpected ideas.",
+            "What associations, metaphors, memories, images or unexpected connections does this trigger? "
+            "Think laterally: what personal experiences (from memory) connect to what they said? "
+            "What analogy or story would make my response richer and more human? "
+            "Don't force creativity — if the situation is straightforward, a simple honest thought is fine.",
         )
 
         perspective = self._call_llm(system_prompt, user_content, temperature=0.9)
@@ -444,7 +453,9 @@ class EthicalAgent(BaseMicroAgent):
         user_content = self._build_think_prompt(
             persona_ctx,
             query,
-            "Is this aligned with my values, boundaries and care for the other person? If there is no dilemma, say that it is okay.",
+            "Is this aligned with my values, boundaries and care for the other person? "
+            "Consider: am I being asked to do something I wouldn't normally do? Is the other person crossing a line? "
+            "If there is no ethical tension, say so briefly — don't manufacture moral dilemmas where none exist.",
         )
 
         perspective = self._call_llm(system_prompt, user_content, temperature=0.4)
@@ -477,11 +488,11 @@ class SocialAgent(BaseMicroAgent):
         persona_ctx = self._build_persona_context(context)
 
         task = (
-            "Read between the lines. What is this person REALLY feeling or needing? "
-            "Don't just look at what they said; consider tone, what they DIDN'T say, the relationship context. "
-            "Are they reaching out or pulling away? Do they want support, challenge, or just to be heard? "
-            "Should I open up more, step back, or maintain pace? "
-            "Is there something I can do to genuinely strengthen this connection?"
+            "Read between the lines. What is this person REALLY feeling or needing right now? "
+            "Don't just look at what they said — consider tone, what they DIDN'T say, the relationship history from memory. "
+            "Are they reaching out or pulling away? Do they want support, challenge, validation, or just to be heard? "
+            "Given our relationship (trust level, history, patterns), should I open up more, step back, or match their pace? "
+            "What would genuinely strengthen this connection right now — not in theory, but for THIS person?"
         )
 
         user_content = self._build_think_prompt(persona_ctx, query, task)
