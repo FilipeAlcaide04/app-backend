@@ -1044,6 +1044,87 @@ Como motor de imaginação autobiográfica:
 Responde em 3-5 frases na primeira pessoa, como se estivesses a lembrar-te.
 """,
     },
+    {
+        "key": "memory.interaction_analysis",
+        "name": "Análise de interação para memória",
+        "category": "memory",
+        "description": "Extrai factos, nome e significado emocional de uma interação para guardar em memória.",
+        "language": "pt-PT",
+        "version": 1,
+        "variables": ["user_name", "query", "response"],
+        "template": """Analisa o que acabou de acontecer nesta troca e extrai tudo o que vale a pena lembrar sobre a pessoa com quem estou a falar.
+
+A pessoa ({user_name}) disse-me:
+"{query}"
+
+Eu respondi:
+"{response}"
+
+Devolve APENAS JSON válido:
+{{
+  "person_name": {{"value": "nome ou vazio", "confidence": 0.0-1.0}},
+  "facts": [
+    {{"fact": "o que aprendi", "type": "identity|preference|experience|relationship|work|location|emotional", "importance": 0.0-1.0}}
+  ],
+  "emotional_significance": {{"is_significant": true|false, "what_i_felt": "curto ou vazio"}}
+}}
+
+REGRAS CRÍTICAS:
+- Analisa APENAS o que a pessoa disse explicitamente. A minha resposta é contexto, não fonte de factos.
+- "facts" devem vir da mensagem dela, não da minha.
+- NÃO inferir factos de perguntas. "Gostas de pesca?" NÃO significa que pesca.
+- O nome da pessoa é APENAS quando se identifica explicitamente ("o meu nome é X", "sou o X", "chama-me X").
+- "importance" reflete quão útil é para conversas futuras: nome ou profissão é alto (0.8+), menção casual é baixo (0.3-0.5).
+- Se a mensagem é cumprimento, pergunta simples ou conversa sem conteúdo pessoal, devolve array de facts vazio.
+- "emotional_significance" é sobre a MINHA reação emocional — esta interação foi significativa para mim?
+""",
+    },
+    {
+        "key": "core.response_validation",
+        "name": "Validação de resposta",
+        "category": "core",
+        "description": "Valida se a resposta final é coerente com a persona e o contexto.",
+        "language": "pt-PT",
+        "version": 1,
+        "variables": ["persona_name", "response", "query"],
+        "template": """Valida se esta resposta é adequada para a persona.
+
+Persona: {persona_name}
+Pergunta do utilizador: "{query}"
+Resposta proposta: "{response}"
+
+Verifica:
+1. A resposta está na perspetiva correta (primeira pessoa)?
+2. É coerente com a personalidade?
+3. Não quebra a quarta parede (não menciona ser IA, LLM, etc.)?
+4. Responde ao que foi perguntado?
+
+Devolve APENAS JSON válido:
+{{
+  "is_valid": true|false,
+  "issues": ["lista de problemas encontrados"],
+  "suggestion": "correção sugerida se inválida, ou vazio"
+}}
+""",
+    },
+    {
+        "key": "core.response_repair",
+        "name": "Reparação de resposta",
+        "category": "core",
+        "description": "Corrige uma resposta que falhou na validação.",
+        "language": "pt-PT",
+        "version": 1,
+        "variables": ["persona_name", "response", "issues", "query"],
+        "template": """A resposta seguinte foi marcada como problemática. Corrige-a mantendo o mesmo tom e intenção.
+
+Persona: {persona_name}
+Pergunta: "{query}"
+Resposta original: "{response}"
+Problemas: {issues}
+
+Reescreve a resposta corrigindo os problemas. Devolve APENAS a resposta corrigida, sem explicações.
+""",
+    },
 ]
 
 apply_english_prompt_overrides(PROMPT_TEMPLATES, MICRO_AGENT_TYPES)

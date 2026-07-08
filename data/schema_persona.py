@@ -348,7 +348,7 @@ class InnerMonologue(Base):
 
     # O pensamento
     thought = Column(Text, nullable=False)
-    inner_voice_tone = Column(String(30))  # harsh_critic | gentle_guide | anxious_narrator | etc.
+    inner_voice_tone = Column(String(100))  # harsh_critic | gentle_guide | anxious_narrator | etc.
 
     # Impacto
     emotional_impact = Column(JSON, default=dict)  # {emotion: change}

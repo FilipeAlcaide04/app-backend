@@ -442,6 +442,19 @@ class CognitiveOrchestrator:
         final_response["conversation_id"] = session.id
         final_response["persona_state"] = self.persona.get_state_summary() if self.persona.has_persona else None
 
+        # Micro-agent thoughts for frontend brain visualization
+        final_response["thought_contributions"] = [
+            {
+                "agent_type": agent_type,
+                "perspective": result.get("perspective", ""),
+                "confidence": result.get("confidence", 0.5),
+                "weight": result.get("weight", 1.0),
+                "supporting_arguments": result.get("supporting_arguments", []),
+                "opposing_arguments": result.get("opposing_arguments", []),
+            }
+            for agent_type, result in thinking_results.items()
+        ]
+
         logger.info(f"✅ PROCESSO COMPLETO")
         logger.info(f"   ⏱️  Tempo total: {duration_ms}ms")
         logger.info(f"   📊 Memórias usadas: {len(memories)} de {len(context.get('memory', []))}")

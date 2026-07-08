@@ -261,6 +261,7 @@ class CreatePersonaRequest(BaseModel):
     debate_intensity: Optional[float] = 0.7
     micro_agent_types: Optional[List[str]] = None
     initial_memories: Optional[List[InitialMemory]] = None
+    is_shared: Optional[bool] = False
 
 
 class ChatRequest(BaseModel):
@@ -295,11 +296,26 @@ def get_db():
         db.close()
 
 
-def _ensure_owner(agent, user: User):
-    """Garante que o utilizador é dono do agente ou admin."""
+def _is_shared_agent(agent, db: Session) -> bool:
+    """Verifica se o agente está marcado como partilhado no blueprint meta."""
+    from data.schema_persona import PersonaBlueprint
+    blueprint = db.query(PersonaBlueprint).filter(
+        PersonaBlueprint.agent_id == agent.id
+    ).first()
+    if blueprint and isinstance(blueprint.meta, dict):
+        return blueprint.meta.get("is_shared", False)
+    return False
+
+
+def _ensure_owner(agent, user: User, db: Session = None, allow_shared: bool = False):
+    """Garante que o utilizador é dono do agente ou admin.
+    Se allow_shared=True e o agente é partilhado, permite acesso de leitura/chat.
+    """
     if user.role == "admin":
         return
     if agent.owner_id and agent.owner_id != user.id:
+        if allow_shared and db and _is_shared_agent(agent, db):
+            return
         raise HTTPException(status_code=403, detail="Não tens acesso a este agente")
 
 
@@ -351,6 +367,9 @@ async def create_persona(
         if request.background_story and "identity" not in persona_data:
             persona_data["identity"] = {}
 
+        if request.is_shared:
+            persona_data.setdefault("meta", {})["is_shared"] = True
+
         persona_engine.create_persona(persona_data)
 
         from agent_system.identity_builder import IdentityBuilder
@@ -364,6 +383,7 @@ async def create_persona(
                 "name": agent.name,
                 "has_persona": True,
                 "has_blueprint": True,
+                "is_shared": bool(request.is_shared),
                 "persona_sections": list(persona_data.keys()) if persona_data else ["defaults"],
                 "identity_preview": identity.get_identity_prompt()[:500] + "...",
                 "initial_state": persona_engine.get_state_summary(),
@@ -386,7 +406,7 @@ async def get_persona_blueprint(
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
-    _ensure_owner(agent, current_user)
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
     persona = PersonaEngine(db, agent_id)
     if not persona.has_persona:
         raise HTTPException(status_code=404, detail="Persona não encontrada")
@@ -448,7 +468,7 @@ async def chat_with_persona(
     agent = service.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agente {agent_id} não encontrado")
-    _ensure_owner(agent, current_user)
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
 
     try:
         start_time = time.time()
@@ -476,7 +496,8 @@ async def chat_with_persona(
             "persona_state": result.get("persona_state"),
             "relationship": result.get("relationship"),
             "confidence": result.get("confidence"),
-            "duration_ms": duration_ms
+            "duration_ms": duration_ms,
+            "thought_contributions": result.get("thought_contributions", []),
         }
 
     except Exception as e:
@@ -502,7 +523,7 @@ async def get_greeting(
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
-    _ensure_owner(agent, current_user)
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
 
     identity = IdentityBuilder(db, agent_id)
     persona = PersonaEngine(db, agent_id)
@@ -620,7 +641,22 @@ async def list_agents(
     agents = service.list_agents(
         active_only=active_only, limit=limit, offset=offset, owner_id=owner_filter
     )
-    return [service.agent_to_dict(agent) for agent in agents]
+
+    # Include shared agents from other users
+    if owner_filter is not None:
+        from data.schema_persona import PersonaBlueprint
+        from sqlalchemy import cast, String
+        shared_blueprints = db.query(PersonaBlueprint).filter(
+            cast(PersonaBlueprint.meta["is_shared"], String) == "true"
+        ).all()
+        own_ids = {a.id for a in agents}
+        for bp in shared_blueprints:
+            if bp.agent_id not in own_ids:
+                shared_agent = service.get_agent(bp.agent_id)
+                if shared_agent and shared_agent.is_active and shared_agent.deleted_at is None:
+                    agents.append(shared_agent)
+
+    return [service.agent_to_dict(agent, db=db) for agent in agents]
 
 
 @app.get("/agents/{agent_id}", tags=["Agents"])
@@ -633,8 +669,8 @@ async def get_agent(
     agent = service.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
-    _ensure_owner(agent, current_user)
-    return service.agent_to_dict(agent)
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
+    return service.agent_to_dict(agent, db=db)
 
 
 @app.put("/agents/{agent_id}", tags=["Agents"])
@@ -651,7 +687,7 @@ async def update_agent(
     _ensure_owner(existing, current_user)
 
     agent = service.update_agent(agent_id, **updates)
-    return service.agent_to_dict(agent)
+    return service.agent_to_dict(agent, db=db)
 
 
 @app.delete("/agents/{agent_id}", tags=["Agents"])
@@ -730,11 +766,11 @@ async def reset_conversation(
 
     agent = db.query(Agent).filter(
         Agent.id == agent_id,
-        Agent.owner_id == current_user.id,
         Agent.deleted_at.is_(None),
     ).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
 
     sessions = db.query(ConversationSession).filter(
         ConversationSession.agent_id == agent_id,

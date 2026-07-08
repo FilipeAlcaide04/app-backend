@@ -429,9 +429,18 @@ class AgentServiceCognitive:
     
     # ========== CONVERSÃO PARA DICT ==========
     
-    def agent_to_dict(self, agent: Agent) -> Dict[str, Any]:
+    def agent_to_dict(self, agent: Agent, db=None) -> Dict[str, Any]:
         """Converte agente para dict"""
-        
+
+        is_shared = False
+        if db:
+            from data.schema_persona import PersonaBlueprint
+            bp = db.query(PersonaBlueprint).filter(
+                PersonaBlueprint.agent_id == agent.id
+            ).first()
+            if bp and isinstance(bp.meta, dict):
+                is_shared = bp.meta.get("is_shared", False)
+
         return {
             "id": agent.id,
             "owner_id": agent.owner_id,
@@ -449,6 +458,7 @@ class AgentServiceCognitive:
             "memories_count": len(agent.memories),
             "documents_count": len(agent.documents),
             "is_active": agent.is_active,
+            "is_shared": is_shared,
             "last_interaction": agent.last_interaction.isoformat() if agent.last_interaction else None,
             "created_at": agent.created_at.isoformat() if agent.created_at else None,
             "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
