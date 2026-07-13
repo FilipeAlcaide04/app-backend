@@ -294,7 +294,7 @@ class ConversationManager:
 
         try:
             from llm_logic.llm_client import get_llm_client
-            raw = get_llm_client().generate(prompt, max_tokens=450, temperature=0.2).strip()
+            raw = get_llm_client().generate(prompt, max_tokens=250, temperature=0.2).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
@@ -464,7 +464,7 @@ class ConversationManager:
 
         try:
             from llm_logic.llm_client import get_llm_client
-            result = get_llm_client().generate(prompt, max_tokens=250, temperature=0.3)
+            result = get_llm_client().generate(prompt, max_tokens=150, temperature=0.3)
             return (result or "").strip()
         except Exception as e:
             logger.debug(f"[summarize] LLM fallback: {e}")
@@ -487,7 +487,7 @@ class ConversationManager:
 
         try:
             from llm_logic.llm_client import get_llm_client
-            raw = get_llm_client().generate(prompt, max_tokens=200, temperature=0.2)
+            raw = get_llm_client().generate(prompt, max_tokens=100, temperature=0.2)
             raw = (raw or "").strip()
             if not raw:
                 return ""

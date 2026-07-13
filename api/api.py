@@ -506,6 +506,69 @@ async def chat_with_persona(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/personas/{agent_id}/chat/stream", tags=["Chat"])
+async def chat_with_persona_stream(
+    agent_id: str,
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Chat com streaming (resposta aparece em tempo real)"""
+    service = AgentServiceCognitive(db)
+    agent = service.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agente {agent_id} não encontrado")
+    _ensure_owner(agent, current_user, db=db, allow_shared=True)
+
+    try:
+        orchestrator = CognitiveOrchestrator(db, agent_id)
+        chat_context = request.context or {}
+        chat_context["user_name"] = current_user.name
+
+        result = await orchestrator.think(
+            query=request.message,
+            context=chat_context,
+            user_id=current_user.id,
+            conversation_id=request.conversation_id,
+            record_process=True
+        )
+
+        response_text = result.get("response", "")
+        
+        async def generate_stream():
+            # Metadados no início
+            yield json.dumps({
+                "type": "metadata",
+                "conversation_id": result.get("conversation_id"),
+                "agent_id": agent_id,
+                "agent_name": agent.get("name") if isinstance(agent, dict) else getattr(agent, "name", ""),
+                "emotional_state": result.get("emotional_state"),
+                "persona_state": result.get("persona_state"),
+            }) + "\n"
+            
+            # Stream da resposta caractere por caractere
+            for char in response_text:
+                yield json.dumps({
+                    "type": "content",
+                    "content": char
+                }) + "\n"
+            
+            # Metadados finais
+            yield json.dumps({
+                "type": "end",
+                "relationship": result.get("relationship"),
+                "confidence": result.get("confidence"),
+                "thought_contributions": result.get("thought_contributions", []),
+            }) + "\n"
+
+        return StreamingResponse(generate_stream(), media_type="application/x-ndjson")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro no chat stream: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/personas/{agent_id}/greeting", tags=["Chat"])
 async def get_greeting(
     agent_id: str,

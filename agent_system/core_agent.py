@@ -471,7 +471,7 @@ class CoreAgent:
         try:
             response = self.llm_client.chat_completion(
                 chat_messages,
-                max_tokens=1000,
+                max_tokens=500,
                 temperature=0.75,
             ).strip()
             return self._validate_and_repair(response, query, persona_name, voice)
@@ -524,7 +524,7 @@ class CoreAgent:
             response=response,
         )
         try:
-            raw = self.llm_client.generate(check_prompt, max_tokens=150, temperature=0.1).strip()
+            raw = self.llm_client.generate(check_prompt, max_tokens=100, temperature=0.1).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
@@ -549,7 +549,7 @@ class CoreAgent:
                 target_language=getattr(self.agent, "language", "pt-PT") or "pt-PT",
             )
             repaired = self.llm_client.generate(
-                repair_prompt, max_tokens=700, temperature=0.3,
+                repair_prompt, max_tokens=350, temperature=0.3,
                 system_prompt=f"You are {voice_name}. Fix the response. Speak as yourself in first person.",
             ).strip()
             return repaired or response
@@ -636,7 +636,7 @@ class CoreAgent:
                 query=query[:800],
                 response=response[:500],
             )
-            raw = self.llm_client.generate(prompt, max_tokens=300, temperature=0.15).strip()
+            raw = self.llm_client.generate(prompt, max_tokens=200, temperature=0.15).strip()
 
             try:
                 analysis = json.loads(raw)

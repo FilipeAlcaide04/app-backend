@@ -295,7 +295,7 @@ class EmotionalEngine:
 
         try:
             from llm_logic.llm_client import get_llm_client
-            raw = get_llm_client().generate(prompt, max_tokens=450, temperature=0.1).strip()
+            raw = get_llm_client().generate(prompt, max_tokens=250, temperature=0.1).strip()
             data = self._parse_json(raw)
             if not isinstance(data, dict):
                 return {}

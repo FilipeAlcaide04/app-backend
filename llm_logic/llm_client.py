@@ -104,6 +104,63 @@ class LLMClient:
         except Exception:
             pass
 
+    def chat_completion_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        model: Optional[str] = None
+    ):
+        """
+        Cria uma completion de chat com streaming (retorna gerador)
+        
+        Args:
+            messages: Lista de mensagens no formato [{"role": "system/user/assistant", "content": "..."}]
+            temperature: Temperatura para sampling
+            max_tokens: Número máximo de tokens
+            model: Nome do modelo (usa self.model se None)
+            
+        Yields:
+            Chunks de texto da resposta
+        """
+        model_name = model or self.model
+        
+        try:
+            stream = self.client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True
+            )
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            err_text = str(e).lower()
+            if not self.is_cloud and ("not found" in err_text or "404" in err_text):
+                try:
+                    fallback = settings.ollama_model or os.getenv("OLLAMA_MODEL", "llama2")
+                    if fallback and fallback != model_name:
+                        logger.warning(f"Modelo '{model_name}' não encontrado, fallback '{fallback}'")
+                        stream = self.client.chat.completions.create(
+                            model=fallback,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stream=True
+                        )
+                        for chunk in stream:
+                            if chunk.choices[0].delta.content:
+                                yield chunk.choices[0].delta.content
+                        self.model = fallback
+                        return
+                except Exception:
+                    pass
+            raise Exception(f"LLM erro ({self.provider}): {e}")
+
     def chat_completion(
         self,
         messages: List[Dict[str, str]],
